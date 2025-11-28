@@ -1,10 +1,10 @@
+use rumqttc::{Client, Event, MqttOptions, TlsConfiguration, Transport};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use rumqttc::{Client, Event, MqttOptions, Transport, TlsConfiguration};
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -114,44 +114,48 @@ fn build_mqtt_options() -> Option<MqttOptions> {
 }
 
 fn start_mqtt_loop() {
-    thread::spawn(|| {
-        loop {
-            MQTT_CONNECTED.store(false, Ordering::SeqCst);
+    thread::spawn(|| loop {
+        MQTT_CONNECTED.store(false, Ordering::SeqCst);
 
-            let Some(mqttoptions) = build_mqtt_options() else {
-                eprintln!("[MQTT] No se pudieron construir las opciones MQTT. Reintentando en {:?}...", MQTT_RETRY_DELAY);
-                thread::sleep(MQTT_RETRY_DELAY);
-                continue;
-            };
-
-            println!(
-                "[MQTT] Intentando conectar (TLS) con {}:{} como {}",
-                MQTT_SERVER, MQTT_PORT, MQTT_CLIENT_ID
+        let Some(mqttoptions) = build_mqtt_options() else {
+            eprintln!(
+                "[MQTT] No se pudieron construir las opciones MQTT. Reintentando en {:?}...",
+                MQTT_RETRY_DELAY
             );
+            thread::sleep(MQTT_RETRY_DELAY);
+            continue;
+        };
 
-            let (_client, mut connection) = Client::new(mqttoptions, 10);
+        println!(
+            "[MQTT] Intentando conectar (TLS) con {}:{} como {}",
+            MQTT_SERVER, MQTT_PORT, MQTT_CLIENT_ID
+        );
 
-            for event in connection.iter() {
-                match event {
-                    Ok(Event::Incoming(pkt)) => {
-                        MQTT_CONNECTED.store(true, Ordering::SeqCst);
-                        println!("[MQTT] Evento entrante: {:?}", pkt);
-                    }
-                    Ok(Event::Outgoing(pkt)) => {
-                        println!("[MQTT] Evento saliente: {:?}", pkt);
-                    }
-                    Err(e) => {
-                        eprintln!("[MQTT] Error en loop: {:?}", e);
-                        MQTT_CONNECTED.store(false, Ordering::SeqCst);
-                        break;
-                    }
+        let (_client, mut connection) = Client::new(mqttoptions, 10);
+
+        for event in connection.iter() {
+            match event {
+                Ok(Event::Incoming(pkt)) => {
+                    MQTT_CONNECTED.store(true, Ordering::SeqCst);
+                    println!("[MQTT] Evento entrante: {:?}", pkt);
+                }
+                Ok(Event::Outgoing(pkt)) => {
+                    println!("[MQTT] Evento saliente: {:?}", pkt);
+                }
+                Err(e) => {
+                    eprintln!("[MQTT] Error en loop: {:?}", e);
+                    MQTT_CONNECTED.store(false, Ordering::SeqCst);
+                    break;
                 }
             }
-
-            eprintln!("[MQTT] Loop MQTT finalizado. Reintentando en {:?}...", MQTT_RETRY_DELAY);
-
-            thread::sleep(MQTT_RETRY_DELAY);
         }
+
+        eprintln!(
+            "[MQTT] Loop MQTT finalizado. Reintentando en {:?}...",
+            MQTT_RETRY_DELAY
+        );
+
+        thread::sleep(MQTT_RETRY_DELAY);
     });
 }
 

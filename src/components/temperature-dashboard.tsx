@@ -86,7 +86,6 @@ export function TemperatureDashboard() {
     return () => clearInterval(interval);
   }, []);
 
-
   useEffect(() => {
     const loadAlertsFromRust = async () => {
       try {
