@@ -22,6 +22,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { invoke } from "@tauri-apps/api/core";
 
 // Tipos de datos para sensores
 interface Sensor {
@@ -38,75 +39,6 @@ interface Sensor {
   chartData: number[];
 }
 
-// Datos de ejemplo (mock data)
-const mockSensors: Sensor[] = [
-  {
-    id: "1",
-    name: "Zona A - Almacén",
-    groupType: "Refrigeración",
-    activeSensors: 0,
-    inactiveSensors: 67,
-    dataPerMonth: 567,
-    spentPerMonth: "$2,746.75",
-    batteryLevel: 12,
-    lastModified: "03/07/2019",
-    isActive: true,
-    chartData: [22, 24, 23, 25, 24, 22, 23, 24, 25, 23],
-  },
-  {
-    id: "2",
-    name: "Zona B - Producción",
-    groupType: "Ambiente",
-    activeSensors: 5363,
-    inactiveSensors: 67,
-    dataPerMonth: 567,
-    spentPerMonth: "$2,746.75",
-    batteryLevel: 12,
-    lastModified: "03/07/2019",
-    isActive: true,
-    chartData: [18, 19, 21, 20, 19, 18, 20, 21, 19, 20],
-  },
-  {
-    id: "3",
-    name: "Zona C - Laboratorio",
-    groupType: "Criogénico",
-    activeSensors: 5363,
-    inactiveSensors: 67,
-    dataPerMonth: 567,
-    spentPerMonth: "$2,746.75",
-    batteryLevel: 12,
-    lastModified: "03/07/2019",
-    isActive: true,
-    chartData: [-80, -78, -82, -79, -80, -81, -79, -80, -78, -82],
-  },
-  {
-    id: "4",
-    name: "Zona D - Oficinas",
-    groupType: "Ambiente",
-    activeSensors: 5363,
-    inactiveSensors: 67,
-    dataPerMonth: 567,
-    spentPerMonth: "$2,746.75",
-    batteryLevel: 12,
-    lastModified: "03/07/2019",
-    isActive: false,
-    chartData: [21, 22, 21, 23, 22, 21, 22, 23, 21, 22],
-  },
-  {
-    id: "5",
-    name: "Zona E - Exterior",
-    groupType: "Ambiente",
-    activeSensors: 5363,
-    inactiveSensors: 67,
-    dataPerMonth: 567,
-    spentPerMonth: "$2,746.75",
-    batteryLevel: 12,
-    lastModified: "03/07/2019",
-    isActive: true,
-    chartData: [28, 30, 32, 31, 29, 28, 30, 31, 32, 30],
-  },
-];
-
 interface Alert {
   id: string;
   dateTime: string;
@@ -114,44 +46,6 @@ interface Alert {
   device: string;
   description: string;
 }
-
-const mockAlerts: Alert[] = [
-  {
-    id: "1",
-    dateTime: "10/11/2025 14:23:15",
-    type: "disconnect",
-    device: "Zona A - Almacén",
-    description: "Sin conexión",
-  },
-  {
-    id: "2",
-    dateTime: "10/11/2025 15:45:32",
-    type: "tempUp",
-    device: "Zona B - Producción",
-    description: "Temp. alta 28°C",
-  },
-  {
-    id: "3",
-    dateTime: "10/11/2025 16:12:08",
-    type: "tempDown",
-    device: "Zona C - Laboratorio",
-    description: "Temp. baja -85°C",
-  },
-  {
-    id: "4",
-    dateTime: "09/11/2025 17:30:41",
-    type: "disconnect",
-    device: "Zona D - Oficinas",
-    description: "Falla de red",
-  },
-  {
-    id: "5",
-    dateTime: "09/11/2025 18:05:19",
-    type: "tempUp",
-    device: "Zona E - Exterior",
-    description: "Sobrecalentami.",
-  },
-];
 
 const getAlertTypeInfo = (type: Alert["type"]) => {
   switch (type) {
@@ -177,10 +71,10 @@ const getAlertTypeInfo = (type: Alert["type"]) => {
 };
 
 export function TemperatureDashboard() {
-  const [alerts, setAlerts] = useState<Alert[]>(mockAlerts);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isInternetConnected, setIsInternetConnected] = useState(true);
-  const [isServerConnected, setIsServerConnected] = useState(true);
+  const [isServerConnected, setIsServerConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -190,6 +84,73 @@ export function TemperatureDashboard() {
       setCurrentTime(new Date());
     }, 1000);
     return () => clearInterval(interval);
+  }, []);
+
+
+  useEffect(() => {
+    const loadAlertsFromRust = async () => {
+      try {
+        const result = await invoke<Alert[]>("get_mock_alerts");
+        setAlerts(result);
+      } catch (error) {
+        console.error("Error al cargar alertas desde Rust:", error);
+      }
+    };
+
+    loadAlertsFromRust();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const pollConnection = async () => {
+      try {
+        const result = await invoke<boolean>("check_internet_connection");
+        if (!cancelled) {
+          setIsInternetConnected(result);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Error al comprobar conexión a Internet:", error);
+          setIsInternetConnected(false);
+        }
+      }
+    };
+
+    // Primera comprobación inmediata
+    pollConnection();
+    const interval = setInterval(pollConnection, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const pollServerConnection = async () => {
+      try {
+        const result = await invoke<boolean>("is_mqtt_connected");
+        if (!cancelled) {
+          setIsServerConnected(result);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Error al comprobar conexión del servidor:", error);
+          setIsServerConnected(false);
+        }
+      }
+    };
+
+    pollServerConnection();
+    const interval = setInterval(pollServerConnection, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleDeleteAlert = (id: string) => {
@@ -253,7 +214,6 @@ export function TemperatureDashboard() {
         <div className="flex items-center justify-end gap-6">
           <div className="flex items-center gap-4">
             <button
-              onClick={() => setIsInternetConnected(!isInternetConnected)}
               className="group transition-all"
               title={
                 isInternetConnected
@@ -261,11 +221,14 @@ export function TemperatureDashboard() {
                   : "Internet desconectado"
               }
             >
-              <Wifi className="h-5 w-5 text-white" />
+              {isInternetConnected ? (
+                <Wifi className="h-5 w-5 text-white transition-transform duration-300 group-hover:scale-110" />
+              ) : (
+                <WifiOff className="h-5 w-5 text-red-500 animate-pulse" />
+              )}
             </button>
 
             <button
-              onClick={() => setIsServerConnected(!isServerConnected)}
               className="group transition-all"
               title={
                 isServerConnected
@@ -273,7 +236,13 @@ export function TemperatureDashboard() {
                   : "Servidor desconectado"
               }
             >
-              <Server className="h-5 w-5 text-white" />
+              <Server
+                className={
+                  isServerConnected
+                    ? "h-5 w-5 text-white transition-transform duration-300 group-hover:scale-110"
+                    : "h-5 w-5 text-red-500 animate-pulse"
+                }
+              />
             </button>
 
             <button

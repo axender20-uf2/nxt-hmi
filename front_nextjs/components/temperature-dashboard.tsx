@@ -1,23 +1,41 @@
-"use client"
+"use client";
 
-import { useState, useEffect } from "react"
-import { ChevronDown, WifiOff, TrendingUp, TrendingDown, Settings, Wifi, Server, Volume2, VolumeX, Moon, Sun, X } from 'lucide-react'
-import { Button } from "@/components/ui/button"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { useState, useEffect } from "react";
+import {
+  ChevronDown,
+  WifiOff,
+  TrendingUp,
+  TrendingDown,
+  Settings,
+  Wifi,
+  Server,
+  Volume2,
+  VolumeX,
+  Moon,
+  Sun,
+  X,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 // Tipos de datos para sensores
 interface Sensor {
-  id: string
-  name: string
-  groupType: string
-  activeSensors: number
-  inactiveSensors: number
-  dataPerMonth: number
-  spentPerMonth: string
-  batteryLevel: number
-  lastModified: string
-  isActive: boolean
-  chartData: number[]
+  id: string;
+  name: string;
+  groupType: string;
+  activeSensors: number;
+  inactiveSensors: number;
+  dataPerMonth: number;
+  spentPerMonth: string;
+  batteryLevel: number;
+  lastModified: string;
+  isActive: boolean;
+  chartData: number[];
 }
 
 // Datos de ejemplo (mock data)
@@ -87,14 +105,14 @@ const mockSensors: Sensor[] = [
     isActive: true,
     chartData: [28, 30, 32, 31, 29, 28, 30, 31, 32, 30],
   },
-]
+];
 
 interface Alert {
-  id: string
-  dateTime: string
-  type: "disconnect" | "tempUp" | "tempDown"
-  device: string
-  description: string
+  id: string;
+  dateTime: string;
+  type: "disconnect" | "tempUp" | "tempDown";
+  device: string;
+  description: string;
 }
 
 const mockAlerts: Alert[] = [
@@ -133,7 +151,7 @@ const mockAlerts: Alert[] = [
     device: "Zona E - Exterior",
     description: "Sobrecalentami.",
   },
-]
+];
 
 const getAlertTypeInfo = (type: Alert["type"]) => {
   switch (type) {
@@ -142,60 +160,73 @@ const getAlertTypeInfo = (type: Alert["type"]) => {
         icon: WifiOff,
         label: "Desconexión",
         color: "text-[#EF4444]",
-      }
+      };
     case "tempUp":
       return {
         icon: TrendingUp,
         label: "Aumento temp.",
         color: "text-[#F97316]",
-      }
+      };
     case "tempDown":
       return {
         icon: TrendingDown,
         label: "Disminución temp.",
         color: "text-[#3B82F6]",
-      }
+      };
   }
-}
+};
 
 export function TemperatureDashboard() {
-  const [alerts, setAlerts] = useState<Alert[]>(mockAlerts)
-  const [currentTime, setCurrentTime] = useState(new Date())
-  const [isInternetConnected, setIsInternetConnected] = useState(true)
-  const [isServerConnected, setIsServerConnected] = useState(true)
-  const [isMuted, setIsMuted] = useState(false)
-  const [isDarkMode, setIsDarkMode] = useState(false)
-  const [showAbout, setShowAbout] = useState(false)
+  const [alerts, setAlerts] = useState<Alert[]>(mockAlerts);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [isInternetConnected, setIsInternetConnected] = useState(false);
+  const [isServerConnected, setIsServerConnected] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setCurrentTime(new Date())
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [])
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleDeleteAlert = (id: string) => {
-    setAlerts(alerts.filter((alert) => alert.id !== id))
-  }
+    setAlerts(alerts.filter((alert) => alert.id !== id));
+  };
 
   const formatDateTime = (date: Date) => {
-    const daysShort = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
-    const monthsShort = ['ene.', 'feb.', 'mar.', 'abr.', 'may.', 'jun.', 'jul.', 'ago.', 'sep.', 'oct.', 'nov.', 'dic.']
-    
-    const dayName = daysShort[date.getDay()]
-    const dayNum = date.getDate()
-    const monthName = monthsShort[date.getMonth()]
-    const hours = String(date.getHours()).padStart(2, '0')
-    const minutes = String(date.getMinutes()).padStart(2, '0')
-    
-    return `${dayName} ${dayNum} ${monthName} ${hours}:${minutes}`
-  }
+    const daysShort = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+    const monthsShort = [
+      "ene.",
+      "feb.",
+      "mar.",
+      "abr.",
+      "may.",
+      "jun.",
+      "jul.",
+      "ago.",
+      "sep.",
+      "oct.",
+      "nov.",
+      "dic.",
+    ];
+
+    const dayName = daysShort[date.getDay()];
+    const dayNum = date.getDate();
+    const monthName = monthsShort[date.getMonth()];
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+
+    return `${dayName} ${dayNum} ${monthName} ${hours}:${minutes}`;
+  };
 
   return (
-    <div 
-      className="flex h-screen flex-col px-8 py-6" 
-      style={{ 
-        backgroundColor: isDarkMode ? '#020617' : '#0b0fbe5e'
+    <div
+      className="flex h-screen flex-col px-8 py-6"
+      style={{
+        backgroundColor: isDarkMode ? "#020617" : "#0b0fbe5e",
       }}
     >
       <div className="mb-4 grid w-full grid-cols-3 items-center px-4 py-3">
@@ -207,12 +238,16 @@ export function TemperatureDashboard() {
           >
             <span className="text-base">Acerca de</span>
           </Button>
-          
-          <span className="text-base font-semibold text-white">Proyecto HMI</span>
+
+          <span className="text-base font-semibold text-white">
+            Proyecto HMI
+          </span>
         </div>
 
         <div className="flex justify-center">
-          <span className="text-base font-medium text-white/90">{formatDateTime(currentTime)}</span>
+          <span className="text-base font-medium text-white/90">
+            {formatDateTime(currentTime)}
+          </span>
         </div>
 
         <div className="flex items-center justify-end gap-6">
@@ -220,15 +255,27 @@ export function TemperatureDashboard() {
             <button
               onClick={() => setIsInternetConnected(!isInternetConnected)}
               className="group transition-all"
-              title={isInternetConnected ? "Internet conectado" : "Internet desconectado"}
+              title={
+                isInternetConnected
+                  ? "Internet conectado"
+                  : "Internet desconectado"
+              }
             >
-              <Wifi className="h-5 w-5 text-white" />
+              {isInternetConnected ? (
+                <Wifi className="h-5 w-5 text-white" />
+              ) : (
+                <WifiOff className="h-5 w-5 text-red-500" />
+              )}
             </button>
 
             <button
               onClick={() => setIsServerConnected(!isServerConnected)}
               className="group transition-all"
-              title={isServerConnected ? "Servidor conectado" : "Servidor desconectado"}
+              title={
+                isServerConnected
+                  ? "Servidor conectado"
+                  : "Servidor desconectado"
+              }
             >
               <Server className="h-5 w-5 text-white" />
             </button>
@@ -236,7 +283,9 @@ export function TemperatureDashboard() {
             <button
               onClick={() => setIsDarkMode(!isDarkMode)}
               className="group transition-all"
-              title={isDarkMode ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}
+              title={
+                isDarkMode ? "Cambiar a modo claro" : "Cambiar a modo oscuro"
+              }
             >
               {isDarkMode ? (
                 <Sun className="h-5 w-5 text-white" />
@@ -251,21 +300,25 @@ export function TemperatureDashboard() {
             className="text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95"
             title={isMuted ? "Activar sonido" : "Silenciar"}
           >
-            {isMuted ? <VolumeX className="h-6 w-6" /> : <Volume2 className="h-6 w-6" />}
+            {isMuted ? (
+              <VolumeX className="h-6 w-6" />
+            ) : (
+              <Volume2 className="h-6 w-6" />
+            )}
           </button>
         </div>
       </div>
 
       {showAbout && (
-        <div 
+        <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
           onClick={() => setShowAbout(false)}
         >
-          <div 
+          <div
             className="relative rounded-xl shadow-2xl p-6 max-w-md w-full mx-4"
             style={{
-              backgroundColor: isDarkMode ? '#0B1220' : '#ffffff',
-              color: isDarkMode ? '#E5E7EB' : '#111827'
+              backgroundColor: isDarkMode ? "#0B1220" : "#ffffff",
+              color: isDarkMode ? "#E5E7EB" : "#111827",
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -274,16 +327,29 @@ export function TemperatureDashboard() {
               className="absolute top-4 right-4 rounded-lg p-1 transition-colors hover:bg-gray-200 dark:hover:bg-gray-700"
               aria-label="Cerrar"
             >
-              <X className="h-5 w-5" style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }} />
+              <X
+                className="h-5 w-5"
+                style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
+              />
             </button>
-            
+
             <div className="space-y-3 text-sm">
               <h2 className="text-lg font-bold">SEIMEG – HMI Panel</h2>
-              <p><span className="font-semibold">Versión:</span> 1.0.0</p>
-              <p><span className="font-semibold">Desarrollador:</span> axender20 ame00hdz jorge (Git)</p>
+              <p>
+                <span className="font-semibold">Versión:</span> 1.0.0
+              </p>
+              <p>
+                <span className="font-semibold">Desarrollador:</span> axender20
+                ame00hdz jorge (Git)
+              </p>
               <p>Quetzaltenango, Guatemala – 2025</p>
-              <p className="pt-2">Sistema de monitoreo y control de temperatura.</p>
-              <p className="pt-2 text-xs" style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}>
+              <p className="pt-2">
+                Sistema de monitoreo y control de temperatura.
+              </p>
+              <p
+                className="pt-2 text-xs"
+                style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
+              >
                 © 2025 SEIMEG. Todos los derechos reservados.
               </p>
             </div>
@@ -291,44 +357,44 @@ export function TemperatureDashboard() {
         </div>
       )}
 
-      <div 
+      <div
         className="flex-1 overflow-hidden rounded-2xl shadow-lg mt-4"
         style={{
-          backgroundColor: isDarkMode ? '#0B1220' : '#ffffff'
+          backgroundColor: isDarkMode ? "#0B1220" : "#ffffff",
         }}
       >
         <div className="h-full overflow-auto">
           <table className="w-full">
             <thead className="sticky top-0">
-              <tr 
+              <tr
                 className="border-b-2"
-                style={{ 
-                  backgroundColor: isDarkMode ? '#0B1220' : '#eeeff8',
-                  borderColor: isDarkMode ? '#1F2937' : '#e5e7eb'
+                style={{
+                  backgroundColor: isDarkMode ? "#0B1220" : "#eeeff8",
+                  borderColor: isDarkMode ? "#1F2937" : "#e5e7eb",
                 }}
               >
                 <th className="w-[10%] px-6 py-3"></th>
-                <th 
+                <th
                   className="w-[20%] px-6 py-3 text-left text-xs font-medium uppercase tracking-wide"
-                  style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                  style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                 >
                   Dispositivo
                 </th>
-                <th 
+                <th
                   className="w-[20%] px-6 py-3 text-left text-xs font-medium uppercase tracking-wide"
-                  style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                  style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                 >
                   Fecha y Hora
                 </th>
-                <th 
+                <th
                   className="w-[25%] px-6 py-3 text-left text-xs font-medium uppercase tracking-wide"
-                  style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                  style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                 >
                   Tipo de Alerta
                 </th>
-                <th 
+                <th
                   className="w-[25%] px-6 py-3 text-left text-xs font-medium uppercase tracking-wide"
-                  style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                  style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                 >
                   Descripción
                 </th>
@@ -336,16 +402,16 @@ export function TemperatureDashboard() {
             </thead>
             <tbody>
               {alerts.map((alert) => {
-                const alertInfo = getAlertTypeInfo(alert.type)
-                const AlertIcon = alertInfo.icon
+                const alertInfo = getAlertTypeInfo(alert.type);
+                const AlertIcon = alertInfo.icon;
 
                 return (
-                  <tr 
-                    key={alert.id} 
+                  <tr
+                    key={alert.id}
                     className="border-b-2 transition-colors"
                     style={{
-                      borderColor: isDarkMode ? '#1F2937' : '#e5e7eb',
-                      backgroundColor: isDarkMode ? '#0B1220' : '#ffffff'
+                      borderColor: isDarkMode ? "#1F2937" : "#e5e7eb",
+                      backgroundColor: isDarkMode ? "#0B1220" : "#ffffff",
                     }}
                   >
                     <td className="w-[10%] px-6 py-3">
@@ -372,17 +438,17 @@ export function TemperatureDashboard() {
                       </button>
                     </td>
                     <td className="w-[20%] px-6 py-3 text-left">
-                      <span 
+                      <span
                         className="text-sm font-medium"
-                        style={{ color: isDarkMode ? '#E5E7EB' : '#000000' }}
+                        style={{ color: isDarkMode ? "#E5E7EB" : "#000000" }}
                       >
                         {alert.device}
                       </span>
                     </td>
                     <td className="w-[20%] px-6 py-3 text-left">
-                      <span 
+                      <span
                         className="text-sm font-medium"
-                        style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                        style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                       >
                         {alert.dateTime}
                       </span>
@@ -390,24 +456,28 @@ export function TemperatureDashboard() {
                     <td className="w-[25%] px-6 py-3 text-left">
                       <div className="flex items-center gap-2">
                         <AlertIcon className={`h-5 w-5 ${alertInfo.color}`} />
-                        <span className={`text-sm font-medium ${alertInfo.color}`}>{alertInfo.label}</span>
+                        <span
+                          className={`text-sm font-medium ${alertInfo.color}`}
+                        >
+                          {alertInfo.label}
+                        </span>
                       </div>
                     </td>
                     <td className="w-[25%] px-6 py-3 text-left">
-                      <span 
+                      <span
                         className="text-sm"
-                        style={{ color: isDarkMode ? '#9CA3AF' : '#6B7280' }}
+                        style={{ color: isDarkMode ? "#9CA3AF" : "#6B7280" }}
                       >
                         {alert.description}
                       </span>
                     </td>
                   </tr>
-                )
+                );
               })}
             </tbody>
           </table>
         </div>
       </div>
     </div>
-  )
+  );
 }

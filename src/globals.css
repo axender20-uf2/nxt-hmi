@@ -1,6 +1,20 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Deshabilitar selección de texto e imágenes en toda la app */
+html,
+body,
+* {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+img {
+  pointer-events: none;
+  user-select: none;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 /* Actualizado color scheme basado en la imagen de referencia para el sistema de monitoreo de temperatura */
@@ -72,8 +86,10 @@
 
 @theme inline {
   /* Cambiando la fuente a SF Pro / SF Pro Rounded */
-  --font-sans: "SF Pro Rounded", "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --font-mono: "SF Mono", "SF Pro Rounded", Menlo, Monaco, "Courier New", monospace;
+  --font-sans: "SF Pro Rounded", "SF Pro Display", -apple-system,
+    BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "SF Mono", "SF Pro Rounded", Menlo, Monaco, "Courier New",
+    monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
