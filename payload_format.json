@@ -1,0 +1,167 @@
+// request.topic: v1/devices/me/rpc/request/4
+
+request.body: {
+  "method": "ALARM",
+  "params": {
+    "id": {
+      "entityType": "ALARM",
+      "id": "39a4ca65-d826-41da-b6c8-ffe877b7854f"
+    },
+    "createdTime": 1763658232107,
+    "tenantId": {
+      "entityType": "TENANT",
+      "id": "1cb0e910-a3cb-11f0-b8ab-b38af83f6c9c"
+    },
+    "type": "Temperature out of range",
+    "originator": {
+      "entityType": "DEVICE",
+      "id": "0386db20-b9c9-11f0-91df-7ffa16af2ee9"
+    },
+    "severity": "CRITICAL",
+    "acknowledged": false,
+    "cleared": false,
+    "startTs": 1763658231935,
+    "endTs": 1763658231935,
+    "ackTs": 0,
+    "clearTs": 0,
+    "assignTs": 0,
+    "propagate": false,
+    "propagateToOwner": false,
+    "propagateToOwnerHierarchy": false,
+    "propagateToTenant": false,
+    "propagateRelationTypes": [],
+    "originatorName": "Sensor push AE53",
+    "originatorLabel": "Sensor push AE53",
+    "name": "Temperature out of range",
+    "status": "ACTIVE_UNACK",
+    "details": {
+      "data": "Temperatura actual = 4.79"
+    }
+  }
+}
+
+request.topic: v1/devices/me/rpc/request/5
+
+request.body: {
+  "method": "ALARM",
+  "params": {
+    "id": {
+      "entityType": "ALARM",
+      "id": "f54f0525-bad3-4d45-9939-5b4b3ebe5b1f"
+    },
+    "createdTime": 1763658235718,
+    "tenantId": {
+      "entityType": "TENANT",
+      "id": "1cb0e910-a3cb-11f0-b8ab-b38af83f6c9c"
+    },
+    "customerId": {
+      "entityType": "CUSTOMER",
+      "id": "21479a00-a551-11f0-b4af-b334f2239a02"
+    },
+    "type": "Temperature out of range",
+    "originator": {
+      "entityType": "DEVICE",
+      "id": "6a74e510-c014-11f0-ae8f-9fad3c067e6e"
+    },
+    "severity": "CRITICAL",
+    "acknowledged": false,
+    "cleared": false,
+    "startTs": 1763658235568,
+    "endTs": 1763658235568,
+    "ackTs": 0,
+    "clearTs": 0,
+    "assignTs": 0,
+    "propagate": false,
+    "propagateToOwner": false,
+    "propagateToOwnerHierarchy": false,
+    "propagateToTenant": false,
+    "propagateRelationTypes": [],
+    "originatorName": "Sensor push 977C",
+    "originatorLabel": "sensorpush0",
+    "name": "Temperature out of range",
+    "status": "ACTIVE_UNACK",
+    "details": {
+      "data": "Temperatura actual = 17.32"
+    }
+  }
+}
+
+request.topic: v1/devices/me/rpc/request/6
+
+request.body: {
+  "method": "ALARM",
+  "params": {
+    "id": {
+      "entityType": "ALARM",
+      "id": "9105fadb-38c8-4053-be01-f8a6f3bb4dfe"
+    },
+    "createdTime": 1763659312625,
+    "tenantId": {
+      "entityType": "TENANT",
+      "id": "1cb0e910-a3cb-11f0-b8ab-b38af83f6c9c"
+    },
+    "type": "Inactivity TimeOut",
+    "originator": {
+      "entityType": "DEVICE",
+      "id": "0386db20-b9c9-11f0-91df-7ffa16af2ee9"
+    },
+    "severity": "CRITICAL",
+    "acknowledged": false,
+    "cleared": false,
+    "startTs": 1763659312567,
+    "endTs": 1763659312567,
+    "ackTs": 0,
+    "clearTs": 0,
+    "assignTs": 0,
+    "propagate": false,
+    "propagateToOwner": false,
+    "propagateToOwnerHierarchy": false,
+    "propagateToTenant": false,
+    "propagateRelationTypes": [],
+    "originatorName": "Sensor push AE53",
+    "originatorLabel": "Sensor push AE53",
+    "name": "Inactivity TimeOut",
+    "status": "ACTIVE_UNACK",
+    "details": {}
+  }
+}
+
+request.topic: v1/devices/me/rpc/request/7
+
+request.body: {
+  "method": "ALARM",
+  "params": {
+    "id": {
+      "entityType": "ALARM",
+      "id": "9105fadb-38c8-4053-be01-f8a6f3bb4dfe"
+    },
+    "createdTime": 1763659312625,
+    "tenantId": {
+      "entityType": "TENANT",
+      "id": "1cb0e910-a3cb-11f0-b8ab-b38af83f6c9c"
+    },
+    "type": "Inactivity TimeOut",
+    "originator": {
+      "entityType": "DEVICE",
+      "id": "0386db20-b9c9-11f0-91df-7ffa16af2ee9"
+    },
+    "severity": "CRITICAL",
+    "acknowledged": false,
+    "cleared": true,
+    "startTs": 1763659312567,
+    "endTs": 1763659312567,
+    "ackTs": 0,
+    "clearTs": 1763659451471,
+    "assignTs": 0,
+    "propagate": false,
+    "propagateToOwner": false,
+    "propagateToOwnerHierarchy": false,
+    "propagateToTenant": false,
+    "propagateRelationTypes": [],
+    "originatorName": "Sensor push AE53",
+    "originatorLabel": "Sensor push AE53",
+    "name": "Inactivity TimeOut",
+    "status": "CLEARED_UNACK",
+    "details": {}
+  }
+}

@@ -23,6 +23,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 // Tipos de datos para sensores
 interface Sensor {
@@ -45,6 +46,10 @@ interface Alert {
   type: "disconnect" | "tempUp" | "tempDown";
   device: string;
   description: string;
+}
+
+interface AlertRemovalEvent {
+  id: string;
 }
 
 const getAlertTypeInfo = (type: Alert["type"]) => {
@@ -89,7 +94,7 @@ export function TemperatureDashboard() {
   useEffect(() => {
     const loadAlertsFromRust = async () => {
       try {
-        const result = await invoke<Alert[]>("get_mock_alerts");
+        const result = await invoke<Alert[]>("get_active_alerts");
         setAlerts(result);
       } catch (error) {
         console.error("Error al cargar alertas desde Rust:", error);
@@ -97,6 +102,42 @@ export function TemperatureDashboard() {
     };
 
     loadAlertsFromRust();
+  }, []);
+
+  useEffect(() => {
+    let unlistenAdded: UnlistenFn | null = null;
+    let unlistenRemoved: UnlistenFn | null = null;
+    let cancelled = false;
+
+    const registerListeners = async () => {
+      try {
+        unlistenAdded = await listen<Alert>("alerts://added", (event) => {
+          setAlerts((prev) => {
+            const filtered = prev.filter((alert) => alert.id !== event.payload.id);
+            return [event.payload, ...filtered];
+          });
+        });
+
+        unlistenRemoved = await listen<AlertRemovalEvent>(
+          "alerts://removed",
+          (event) => {
+            setAlerts((prev) => prev.filter((alert) => alert.id !== event.payload.id));
+          }
+        );
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Error al registrar listeners de alertas:", error);
+        }
+      }
+    };
+
+    registerListeners();
+
+    return () => {
+      cancelled = true;
+      unlistenAdded?.();
+      unlistenRemoved?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -152,8 +193,15 @@ export function TemperatureDashboard() {
     };
   }, []);
 
-  const handleDeleteAlert = (id: string) => {
-    setAlerts(alerts.filter((alert) => alert.id !== id));
+  const handleDeleteAlert = async (id: string) => {
+    try {
+      const removed = await invoke<boolean>("remove_alert", { id });
+      if (removed) {
+        setAlerts((prev) => prev.filter((alert) => alert.id !== id));
+      }
+    } catch (error) {
+      console.error("Error al eliminar alerta:", error);
+    }
   };
 
   const formatDateTime = (date: Date) => {

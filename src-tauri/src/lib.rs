@@ -1,20 +1,29 @@
-use rumqttc::{Client, Event, MqttOptions, TlsConfiguration, Transport};
+use chrono::{Local, Utc};
+use rumqttc::{Client, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+use tauri::Emitter;
+
+static ALERT_STORE: OnceLock<Mutex<HashMap<String, Alert>>> = OnceLock::new();
+const ALERT_ADDED_EVENT: &str = "alerts://added";
+const ALERT_REMOVED_EVENT: &str = "alerts://removed";
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 // Configuración de conexión MQTT (alineada con MQTTX)
-pub const MQTT_SERVER: &str = "rfc7cf00.ala.us-east-1.emqxsl.com";
+pub const MQTT_SERVER: &str = "j0661b06.ala.us-east-1.emqxsl.com";
 pub const MQTT_PORT: u16 = 8883;
 pub const MQTT_CLIENT_ID: &str = "hmi-cli";
 pub const MQTT_USERNAME: &str = "test";
 pub const MQTT_PASSWORD: &str = "test";
+pub const MQTT_RPC_REQUEST_TOPIC: &str = "v1/devices/me/rpc/request/+";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AlertType {
@@ -40,45 +49,177 @@ pub struct Alert {
     pub description: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AlarmRpcEnvelope {
+    method: String,
+    params: AlarmParams,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AlarmParams {
+    id: AlarmEntityId,
+    created_time: i64,
+    #[serde(rename = "type")]
+    alarm_type: String,
+    originator_name: String,
+    status: AlarmStatus,
+    #[serde(default)]
+    details: Option<AlarmDetails>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AlarmEntityId {
+    #[serde(rename = "id")]
+    value: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AlarmDetails {
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AlarmStatus {
+    ActiveUnack,
+    ClearedUnack,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+struct AlertRemovalEvent {
+    id: String,
+}
+
+fn with_alert_store<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut HashMap<String, Alert>) -> R,
+{
+    let store = ALERT_STORE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+fn snapshot_alerts() -> Vec<Alert> {
+    with_alert_store(|store| store.values().cloned().collect())
+}
+
+fn cache_alert(alert: &Alert) {
+    let alert_clone = alert.clone();
+    with_alert_store(|store| {
+        store.insert(alert_clone.id.clone(), alert_clone);
+    });
+}
+
+fn remove_alert_by_id(id: &str) -> Option<Alert> {
+    with_alert_store(|store| store.remove(id))
+}
+
+fn format_timestamp_ms(ts_ms: i64) -> String {
+    if let Some(datetime) = chrono::DateTime::<Utc>::from_timestamp_millis(ts_ms) {
+        datetime
+            .with_timezone(&Local)
+            .format("%d/%m/%Y %H:%M:%S")
+            .to_string()
+    } else {
+        Local::now().format("%d/%m/%Y %H:%M:%S").to_string()
+    }
+}
+
+fn map_alert_type(source: &str) -> AlertType {
+    match source {
+        "Temperature out of range" => AlertType::TempUp,
+        "Inactivity TimeOut" => AlertType::Disconnect,
+        _ => AlertType::TempUp,
+    }
+}
+
+fn map_description(source: &str, details: Option<&AlarmDetails>) -> String {
+    match source {
+        "Temperature out of range" => details
+            .and_then(|d| d.data.clone())
+            .unwrap_or_else(|| "Temperatura fuera de rango".to_string()),
+        "Inactivity TimeOut" => "Dispositivo desconectado".to_string(),
+        _ => "Detalle no disponible".to_string(),
+    }
+}
+
+fn alert_from_params(params: &AlarmParams) -> Alert {
+    Alert {
+        id: params.id.value.clone(),
+        date_time: format_timestamp_ms(params.created_time),
+        alert_type: map_alert_type(&params.alarm_type),
+        device: params.originator_name.clone(),
+        description: map_description(&params.alarm_type, params.details.as_ref()),
+    }
+}
+
+fn emit_alert_added(app_handle: &tauri::AppHandle, alert: &Alert) {
+    if let Err(err) = app_handle.emit(ALERT_ADDED_EVENT, alert) {
+        eprintln!("[MQTT] No se pudo emitir evento de alerta agregada: {:?}", err);
+    }
+}
+
+fn emit_alert_removed(app_handle: &tauri::AppHandle, id: &str) {
+    let payload = AlertRemovalEvent { id: id.to_string() };
+    if let Err(err) = app_handle.emit(ALERT_REMOVED_EVENT, &payload) {
+        eprintln!("[MQTT] No se pudo emitir evento de alerta eliminada: {:?}", err);
+    }
+}
+
+fn handle_active_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
+    let alert = alert_from_params(&params);
+    cache_alert(&alert);
+    emit_alert_added(app_handle, &alert);
+}
+
+fn handle_cleared_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
+    let alert_id = params.id.value;
+    if remove_alert_by_id(&alert_id).is_some() {
+        emit_alert_removed(app_handle, &alert_id);
+    }
+}
+
+fn handle_rpc_payload(payload: &[u8], app_handle: &tauri::AppHandle) {
+    let envelope: AlarmRpcEnvelope = match serde_json::from_slice(payload) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("[MQTT] No se pudo parsear payload RPC: {:?}", err);
+            return;
+        }
+    };
+
+    if !envelope.method.eq_ignore_ascii_case("ALARM") {
+        return;
+    }
+
+    match envelope.params.status {
+        AlarmStatus::ActiveUnack => handle_active_alarm(envelope.params, app_handle),
+        AlarmStatus::ClearedUnack => handle_cleared_alarm(envelope.params, app_handle),
+        AlarmStatus::Unknown => {
+            println!("[MQTT] Estado de alarma no manejado, se ignora payload.");
+        }
+    }
+}
+
 #[tauri::command]
-fn get_mock_alerts() -> Vec<Alert> {
-    vec![
-        Alert {
-            id: "1".to_string(),
-            date_time: "10/11/2025 14:23:15".to_string(),
-            alert_type: AlertType::Disconnect,
-            device: "Zona A - Almacén".to_string(),
-            description: "Sin conexión".to_string(),
-        },
-        Alert {
-            id: "2".to_string(),
-            date_time: "10/11/2025 15:45:32".to_string(),
-            alert_type: AlertType::TempUp,
-            device: "Zona B - Producción".to_string(),
-            description: "Temp. alta 28°C".to_string(),
-        },
-        Alert {
-            id: "3".to_string(),
-            date_time: "10/11/2025 16:12:08".to_string(),
-            alert_type: AlertType::TempDown,
-            device: "Zona C - Laboratorio".to_string(),
-            description: "Temp. baja -85°C".to_string(),
-        },
-        Alert {
-            id: "4".to_string(),
-            date_time: "09/11/2025 17:30:41".to_string(),
-            alert_type: AlertType::Disconnect,
-            device: "Zona D - Oficinas".to_string(),
-            description: "Falla de red".to_string(),
-        },
-        Alert {
-            id: "5".to_string(),
-            date_time: "09/11/2025 18:05:19".to_string(),
-            alert_type: AlertType::TempUp,
-            device: "Zona E - Exterior".to_string(),
-            description: "Sobrecalentami.".to_string(),
-        },
-    ]
+fn get_active_alerts() -> Vec<Alert> {
+    snapshot_alerts()
+}
+
+#[tauri::command]
+fn remove_alert(app_handle: tauri::AppHandle, id: String) -> bool {
+    if remove_alert_by_id(&id).is_some() {
+        emit_alert_removed(&app_handle, &id);
+        true
+    } else {
+        false
+    }
 }
 
 #[tauri::command]
@@ -113,8 +254,8 @@ fn build_mqtt_options() -> Option<MqttOptions> {
     Some(mqttoptions)
 }
 
-fn start_mqtt_loop() {
-    thread::spawn(|| loop {
+fn start_mqtt_loop(app_handle: tauri::AppHandle) {
+    thread::spawn(move || loop {
         MQTT_CONNECTED.store(false, Ordering::SeqCst);
 
         let Some(mqttoptions) = build_mqtt_options() else {
@@ -131,10 +272,28 @@ fn start_mqtt_loop() {
             MQTT_SERVER, MQTT_PORT, MQTT_CLIENT_ID
         );
 
-        let (_client, mut connection) = Client::new(mqttoptions, 10);
+        let (client, mut connection) = Client::new(mqttoptions, 10);
+
+        if let Err(err) = client.subscribe(MQTT_RPC_REQUEST_TOPIC, QoS::AtLeastOnce) {
+            eprintln!(
+                "[MQTT] No se pudo suscribir a {}: {:?}. Reintentando en {:?}...",
+                MQTT_RPC_REQUEST_TOPIC, err, MQTT_RETRY_DELAY
+            );
+            thread::sleep(MQTT_RETRY_DELAY);
+            continue;
+        }
+
+        println!(
+            "[MQTT] Suscrito a solicitudes RPC en {}",
+            MQTT_RPC_REQUEST_TOPIC
+        );
 
         for event in connection.iter() {
             match event {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    MQTT_CONNECTED.store(true, Ordering::SeqCst);
+                    handle_rpc_payload(&publish.payload, &app_handle);
+                }
                 Ok(Event::Incoming(pkt)) => {
                     MQTT_CONNECTED.store(true, Ordering::SeqCst);
                     println!("[MQTT] Evento entrante: {:?}", pkt);
@@ -166,16 +325,18 @@ fn is_mqtt_connected() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Iniciar bucle MQTT en segundo plano
-    start_mqtt_loop();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            get_mock_alerts,
+            get_active_alerts,
+            remove_alert,
             check_internet_connection,
             is_mqtt_connected
         ])
+        .setup(|app| {
+            start_mqtt_loop(app.handle().clone());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
