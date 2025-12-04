@@ -2,11 +2,9 @@
 
 import { useState, useEffect } from "react";
 import {
-  ChevronDown,
   WifiOff,
   TrendingUp,
   TrendingDown,
-  Settings,
   Wifi,
   Server,
   Volume2,
@@ -16,29 +14,8 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-
-// Tipos de datos para sensores
-interface Sensor {
-  id: string;
-  name: string;
-  groupType: string;
-  activeSensors: number;
-  inactiveSensors: number;
-  dataPerMonth: number;
-  spentPerMonth: string;
-  batteryLevel: number;
-  lastModified: string;
-  isActive: boolean;
-  chartData: number[];
-}
 
 interface Alert {
   id: string;
@@ -50,6 +27,11 @@ interface Alert {
 
 interface AlertRemovalEvent {
   id: string;
+}
+
+interface MuteStatePayload {
+  muted: boolean;
+  expiresAt?: string | null;
 }
 
 const getAlertTypeInfo = (type: Alert["type"]) => {
@@ -81,6 +63,7 @@ export function TemperatureDashboard() {
   const [isInternetConnected, setIsInternetConnected] = useState(true);
   const [isServerConnected, setIsServerConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [muteExpiresAt, setMuteExpiresAt] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
 
@@ -102,6 +85,20 @@ export function TemperatureDashboard() {
     };
 
     loadAlertsFromRust();
+  }, []);
+
+  useEffect(() => {
+    const loadMuteState = async () => {
+      try {
+        const result = await invoke<MuteStatePayload>("get_mute_status");
+        setIsMuted(result.muted);
+        setMuteExpiresAt(result.expiresAt ?? null);
+      } catch (error) {
+        console.error("Error al cargar estado de mute:", error);
+      }
+    };
+
+    loadMuteState();
   }, []);
 
   useEffect(() => {
@@ -137,6 +134,35 @@ export function TemperatureDashboard() {
       cancelled = true;
       unlistenAdded?.();
       unlistenRemoved?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlistenMute: UnlistenFn | null = null;
+    let cancelled = false;
+
+    const registerMuteListener = async () => {
+      try {
+        unlistenMute = await listen<MuteStatePayload>(
+          "alerts://mute_changed",
+          (event) => {
+            if (cancelled) return;
+            setIsMuted(event.payload.muted);
+            setMuteExpiresAt(event.payload.expiresAt ?? null);
+          }
+        );
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Error al registrar listener de mute:", error);
+        }
+      }
+    };
+
+    registerMuteListener();
+
+    return () => {
+      cancelled = true;
+      unlistenMute?.();
     };
   }, []);
 
@@ -204,6 +230,16 @@ export function TemperatureDashboard() {
     }
   };
 
+  const handleToggleMute = async () => {
+    try {
+      const result = await invoke<MuteStatePayload>("toggle_alerts_mute");
+      setIsMuted(result.muted);
+      setMuteExpiresAt(result.expiresAt ?? null);
+    } catch (error) {
+      console.error("Error al alternar mute:", error);
+    }
+  };
+
   const formatDateTime = (date: Date) => {
     const daysShort = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
     const monthsShort = [
@@ -229,6 +265,15 @@ export function TemperatureDashboard() {
 
     return `${dayName} ${dayNum} ${monthName} ${hours}:${minutes}`;
   };
+
+  const muteButtonDisabled = !isMuted && alerts.length === 0;
+  const muteTooltip = isMuted
+    ? muteExpiresAt
+      ? `Silenciado hasta ${new Date(muteExpiresAt).toLocaleTimeString()}`
+      : "Silencio temporal activo"
+    : muteButtonDisabled
+    ? "Sin alertas activas"
+    : "Silenciar";
 
   return (
     <div
@@ -308,9 +353,10 @@ export function TemperatureDashboard() {
           </div>
 
           <button
-            onClick={() => setIsMuted(!isMuted)}
-            className="text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95"
-            title={isMuted ? "Activar sonido" : "Silenciar"}
+            onClick={handleToggleMute}
+            disabled={muteButtonDisabled}
+            className={`text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95 ${muteButtonDisabled ? "opacity-40 cursor-not-allowed hover:scale-100" : ""}`}
+            title={muteTooltip}
           >
             {isMuted ? (
               <VolumeX className="h-6 w-6" />

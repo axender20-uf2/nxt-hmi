@@ -1,18 +1,23 @@
-use chrono::{Local, Utc};
+use chrono::{Local, SecondsFormat, Utc};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::net::TcpStream;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tauri::Emitter;
+use tauri::async_runtime::{self, JoinHandle};
 
 static ALERT_STORE: OnceLock<Mutex<HashMap<String, Alert>>> = OnceLock::new();
 const ALERT_ADDED_EVENT: &str = "alerts://added";
 const ALERT_REMOVED_EVENT: &str = "alerts://removed";
+static MUTE_CONTROLLER: OnceLock<Mutex<MuteController>> = OnceLock::new();
+const MUTE_CHANGED_EVENT: &str = "alerts://mute_changed";
+const MUTE_DURATION: Duration = Duration::from_secs(600);
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -94,6 +99,29 @@ struct AlertRemovalEvent {
     id: String,
 }
 
+struct MuteController {
+    muted: bool,
+    deadline: Option<SystemTime>,
+    timer: Option<JoinHandle<()>>,
+}
+
+impl Default for MuteController {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            deadline: None,
+            timer: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct MuteStatePayload {
+    muted: bool,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<String>,
+}
+
 fn with_alert_store<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<String, Alert>) -> R,
@@ -103,6 +131,161 @@ where
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard)
+}
+
+fn with_mute_controller<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut MuteController) -> R,
+{
+    let controller = MUTE_CONTROLLER.get_or_init(|| Mutex::new(MuteController::default()));
+    let mut guard = controller
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+fn snapshot_mute_state() -> MuteStatePayload {
+    with_mute_controller(|ctrl| MuteStatePayload {
+        muted: ctrl.muted,
+        expires_at: format_deadline(ctrl.deadline),
+    })
+}
+
+fn format_deadline(deadline: Option<SystemTime>) -> Option<String> {
+    deadline.map(|ts| {
+        let datetime: chrono::DateTime<Utc> = ts.into();
+        datetime.to_rfc3339_opts(SecondsFormat::Secs, true)
+    })
+}
+
+fn emit_mute_state(app_handle: &tauri::AppHandle, payload: &MuteStatePayload) {
+    if let Err(err) = app_handle.emit(MUTE_CHANGED_EVENT, payload) {
+        eprintln!("[MUTE] No se pudo emitir estado mute: {:?}", err);
+    }
+}
+
+fn cancel_mute_timer(ctrl: &mut MuteController) {
+    if let Some(handle) = ctrl.timer.take() {
+        handle.abort();
+    }
+}
+
+fn schedule_mute_timer(app_handle: &tauri::AppHandle) -> JoinHandle<()> {
+    let app_handle = app_handle.clone();
+    async_runtime::spawn(async move {
+        tokio::time::sleep(MUTE_DURATION).await;
+        handle_mute_timeout(app_handle);
+    })
+}
+
+fn handle_mute_timeout(app_handle: tauri::AppHandle) {
+    let should_emit = with_mute_controller(|ctrl| {
+        if ctrl.muted {
+            ctrl.muted = false;
+            ctrl.deadline = None;
+            ctrl.timer = None;
+            true
+        } else {
+            ctrl.timer = None;
+            false
+        }
+    });
+
+    if !should_emit {
+        return;
+    }
+
+    if has_active_alerts() {
+        set_buzzer_state(true);
+    } else {
+        set_buzzer_state(false);
+    }
+
+    let payload = snapshot_mute_state();
+    emit_mute_state(&app_handle, &payload);
+}
+
+fn has_active_alerts() -> bool {
+    with_alert_store(|store| !store.is_empty())
+}
+
+fn force_unmute(app_handle: &tauri::AppHandle) -> Option<MuteStatePayload> {
+    let changed = with_mute_controller(|ctrl| {
+        if ctrl.muted || ctrl.deadline.is_some() || ctrl.timer.is_some() {
+            ctrl.muted = false;
+            ctrl.deadline = None;
+            cancel_mute_timer(ctrl);
+            true
+        } else {
+            false
+        }
+    });
+
+    if changed {
+        let payload = snapshot_mute_state();
+        emit_mute_state(app_handle, &payload);
+        Some(payload)
+    } else {
+        None
+    }
+}
+
+fn mute_alerts_internal(app_handle: &tauri::AppHandle) -> MuteStatePayload {
+    let expires_at = SystemTime::now()
+        .checked_add(MUTE_DURATION)
+        .unwrap_or_else(|| SystemTime::now());
+    let timer = schedule_mute_timer(app_handle);
+
+    with_mute_controller(|ctrl| {
+        cancel_mute_timer(ctrl);
+        ctrl.muted = true;
+        ctrl.deadline = Some(expires_at);
+        ctrl.timer = Some(timer);
+    });
+
+    set_buzzer_state(false);
+
+    let payload = snapshot_mute_state();
+    emit_mute_state(app_handle, &payload);
+    payload
+}
+
+fn handle_alert_activation_side_effects(app_handle: &tauri::AppHandle) {
+    let mut unmuted = false;
+    with_mute_controller(|ctrl| {
+        if ctrl.muted {
+            ctrl.muted = false;
+            ctrl.deadline = None;
+            cancel_mute_timer(ctrl);
+            unmuted = true;
+        }
+    });
+
+    if unmuted {
+        let payload = snapshot_mute_state();
+        emit_mute_state(app_handle, &payload);
+    }
+
+    set_buzzer_state(true);
+}
+
+fn handle_no_active_alerts(app_handle: &tauri::AppHandle) {
+    let mut changed = false;
+    with_mute_controller(|ctrl| {
+        if ctrl.muted || ctrl.deadline.is_some() || ctrl.timer.is_some() {
+            ctrl.muted = false;
+            ctrl.deadline = None;
+            cancel_mute_timer(ctrl);
+            changed = true;
+        }
+    });
+
+    if changed {
+        let payload = snapshot_mute_state();
+        emit_mute_state(app_handle, &payload);
+    }
+
+    set_buzzer_state(false);
 }
 
 fn snapshot_alerts() -> Vec<Alert> {
@@ -175,6 +358,7 @@ fn emit_alert_removed(app_handle: &tauri::AppHandle, id: &str) {
 fn handle_active_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
     let alert = alert_from_params(&params);
     cache_alert(&alert);
+    handle_alert_activation_side_effects(app_handle);
     emit_alert_added(app_handle, &alert);
 }
 
@@ -182,6 +366,9 @@ fn handle_cleared_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
     let alert_id = params.id.value;
     if remove_alert_by_id(&alert_id).is_some() {
         emit_alert_removed(app_handle, &alert_id);
+        if !has_active_alerts() {
+            handle_no_active_alerts(app_handle);
+        }
     }
 }
 
@@ -216,6 +403,9 @@ fn get_active_alerts() -> Vec<Alert> {
 fn remove_alert(app_handle: tauri::AppHandle, id: String) -> bool {
     if remove_alert_by_id(&id).is_some() {
         emit_alert_removed(&app_handle, &id);
+        if !has_active_alerts() {
+            handle_no_active_alerts(&app_handle);
+        }
         true
     } else {
         false
@@ -229,6 +419,89 @@ fn check_internet_connection() -> bool {
         std::time::Duration::from_secs(2),
     )
     .is_ok()
+}
+
+#[tauri::command]
+fn get_mute_status() -> MuteStatePayload {
+    snapshot_mute_state()
+}
+
+#[tauri::command]
+fn toggle_alerts_mute(app_handle: tauri::AppHandle) -> MuteStatePayload {
+    let currently_muted = with_mute_controller(|ctrl| ctrl.muted);
+
+    if currently_muted {
+        force_unmute(&app_handle);
+        if has_active_alerts() {
+            set_buzzer_state(true);
+        } else {
+            set_buzzer_state(false);
+        }
+        snapshot_mute_state()
+    } else {
+        if !has_active_alerts() {
+            return snapshot_mute_state();
+        }
+        mute_alerts_internal(&app_handle)
+    }
+}
+
+/// Ejecuta la línea de comandos documentada para fijar el estado del buzzer.
+fn set_buzzer_state(on: bool) -> bool {
+    let level = if on { "1" } else { "0" };
+
+    let gpiofind_output = match Command::new("gpiofind").arg("BUZZER_EN").output() {
+        Ok(output) => output,
+        Err(err) => {
+            eprintln!("[BUZZER] No se pudo ejecutar gpiofind: {:?}", err);
+            return false;
+        }
+    };
+
+    if !gpiofind_output.status.success() {
+        eprintln!(
+            "[BUZZER] gpiofind devolvió código {:?}: {}",
+            gpiofind_output.status.code(),
+            String::from_utf8_lossy(&gpiofind_output.stderr)
+        );
+        return false;
+    }
+
+    let location = String::from_utf8_lossy(&gpiofind_output.stdout);
+    let mut parts = location.split_whitespace();
+    let chip = match parts.next() {
+        Some(chip) => chip.trim(),
+        None => {
+            eprintln!("[BUZZER] gpiofind no devolvió un chip válido");
+            return false;
+        }
+    };
+    let line = match parts.next() {
+        Some(line) => line.trim(),
+        None => {
+            eprintln!("[BUZZER] gpiofind no devolvió una línea válida");
+            return false;
+        }
+    };
+
+    match Command::new("gpioset")
+        .arg(chip)
+        .arg(format!("{}={}", line, level))
+        .status()
+    {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            eprintln!(
+                "[BUZZER] gpioset terminó con código {:?}",
+                status.code()
+            );
+            false
+        }
+        Err(err) => {
+            eprintln!("[BUZZER] No se pudo ejecutar gpioset: {:?}", err);
+            false
+        }
+    }
 }
 
 fn build_mqtt_options() -> Option<MqttOptions> {
@@ -331,6 +604,8 @@ pub fn run() {
             get_active_alerts,
             remove_alert,
             check_internet_connection,
+            get_mute_status,
+            toggle_alerts_mute,
             is_mqtt_connected
         ])
         .setup(|app| {
