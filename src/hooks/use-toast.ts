@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 // Inspirado en react-hot-toast
 import * as React from "react";

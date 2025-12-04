@@ -110,7 +110,9 @@ export function TemperatureDashboard() {
       try {
         unlistenAdded = await listen<Alert>("alerts://added", (event) => {
           setAlerts((prev) => {
-            const filtered = prev.filter((alert) => alert.id !== event.payload.id);
+            const filtered = prev.filter(
+              (alert) => alert.id !== event.payload.id
+            );
             return [event.payload, ...filtered];
           });
         });
@@ -118,7 +120,9 @@ export function TemperatureDashboard() {
         unlistenRemoved = await listen<AlertRemovalEvent>(
           "alerts://removed",
           (event) => {
-            setAlerts((prev) => prev.filter((alert) => alert.id !== event.payload.id));
+            setAlerts((prev) =>
+              prev.filter((alert) => alert.id !== event.payload.id)
+            );
           }
         );
       } catch (error) {
@@ -355,7 +359,11 @@ export function TemperatureDashboard() {
           <button
             onClick={handleToggleMute}
             disabled={muteButtonDisabled}
-            className={`text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95 ${muteButtonDisabled ? "opacity-40 cursor-not-allowed hover:scale-100" : ""}`}
+            className={`text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95 ${
+              muteButtonDisabled
+                ? "opacity-40 cursor-not-allowed hover:scale-100"
+                : ""
+            }`}
             title={muteTooltip}
           >
             {isMuted ? (

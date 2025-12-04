@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use tauri::Emitter;
 use tauri::async_runtime::{self, JoinHandle};
+use tauri::Emitter;
 
 static ALERT_STORE: OnceLock<Mutex<HashMap<String, Alert>>> = OnceLock::new();
 const ALERT_ADDED_EVENT: &str = "alerts://added";
@@ -344,14 +344,20 @@ fn alert_from_params(params: &AlarmParams) -> Alert {
 
 fn emit_alert_added(app_handle: &tauri::AppHandle, alert: &Alert) {
     if let Err(err) = app_handle.emit(ALERT_ADDED_EVENT, alert) {
-        eprintln!("[MQTT] No se pudo emitir evento de alerta agregada: {:?}", err);
+        eprintln!(
+            "[MQTT] No se pudo emitir evento de alerta agregada: {:?}",
+            err
+        );
     }
 }
 
 fn emit_alert_removed(app_handle: &tauri::AppHandle, id: &str) {
     let payload = AlertRemovalEvent { id: id.to_string() };
     if let Err(err) = app_handle.emit(ALERT_REMOVED_EVENT, &payload) {
-        eprintln!("[MQTT] No se pudo emitir evento de alerta eliminada: {:?}", err);
+        eprintln!(
+            "[MQTT] No se pudo emitir evento de alerta eliminada: {:?}",
+            err
+        );
     }
 }
 
@@ -491,10 +497,7 @@ fn set_buzzer_state(on: bool) -> bool {
     {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            eprintln!(
-                "[BUZZER] gpioset terminó con código {:?}",
-                status.code()
-            );
+            eprintln!("[BUZZER] gpioset terminó con código {:?}", status.code());
             false
         }
         Err(err) => {
