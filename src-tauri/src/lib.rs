@@ -15,6 +15,7 @@ use tauri::Emitter;
 static ALERT_STORE: OnceLock<Mutex<HashMap<String, Alert>>> = OnceLock::new();
 const ALERT_ADDED_EVENT: &str = "alerts://added";
 const ALERT_REMOVED_EVENT: &str = "alerts://removed";
+static BUZZER_CONTROLLER: OnceLock<Mutex<BuzzerController>> = OnceLock::new();
 static MUTE_CONTROLLER: OnceLock<Mutex<MuteController>> = OnceLock::new();
 const MUTE_CHANGED_EVENT: &str = "alerts://mute_changed";
 const MUTE_DURATION: Duration = Duration::from_secs(600);
@@ -99,6 +100,16 @@ struct AlertRemovalEvent {
     id: String,
 }
 
+struct BuzzerController {
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Default for BuzzerController {
+    fn default() -> Self {
+        Self { handle: None }
+    }
+}
+
 struct MuteController {
     muted: bool,
     deadline: Option<SystemTime>,
@@ -128,6 +139,17 @@ where
 {
     let store = ALERT_STORE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+fn with_buzzer_controller<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut BuzzerController) -> R,
+{
+    let controller = BUZZER_CONTROLLER.get_or_init(|| Mutex::new(BuzzerController::default()));
+    let mut guard = controller
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut guard)
@@ -452,8 +474,64 @@ fn toggle_alerts_mute(app_handle: tauri::AppHandle) -> MuteStatePayload {
     }
 }
 
-/// Ejecuta la línea de comandos documentada para fijar el estado del buzzer.
+/// Controla el estado del buzzer. Cuando se enciende, parpadea cada segundo.
 fn set_buzzer_state(on: bool) -> bool {
+    if on {
+        start_buzzer_blinking()
+    } else {
+        stop_buzzer_blinking()
+    }
+}
+
+fn start_buzzer_blinking() -> bool {
+    if with_buzzer_controller(|ctrl| ctrl.handle.is_some()) {
+        return true;
+    }
+
+    if !set_buzzer_gpio(true) {
+        return false;
+    }
+
+    let handle = async_runtime::spawn(async move {
+        let mut level = false;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            level = !level;
+            if !set_buzzer_gpio(level) {
+                eprintln!("[BUZZER] Falló al alternar nivel {}", level as u8);
+            }
+        }
+    });
+
+    let mut handle_slot = Some(handle);
+    let was_set = with_buzzer_controller(|ctrl| {
+        if ctrl.handle.is_none() {
+            ctrl.handle = handle_slot.take();
+            true
+        } else {
+            false
+        }
+    });
+
+    if !was_set {
+        // Otro hilo inició el parpadeo; abortamos este para evitar duplicados.
+        if let Some(handle) = handle_slot {
+            handle.abort();
+        }
+    }
+
+    true
+}
+
+fn stop_buzzer_blinking() -> bool {
+    if let Some(handle) = with_buzzer_controller(|ctrl| ctrl.handle.take()) {
+        handle.abort();
+    }
+
+    set_buzzer_gpio(false)
+}
+
+fn set_buzzer_gpio(on: bool) -> bool {
     let level = if on { "1" } else { "0" };
 
     let gpiofind_output = match Command::new("gpiofind").arg("BUZZER_EN").output() {
@@ -478,14 +556,14 @@ fn set_buzzer_state(on: bool) -> bool {
     let chip = match parts.next() {
         Some(chip) => chip.trim(),
         None => {
-            eprintln!("[BUZZER] gpiofind no devolvió un chip válido");
+            eprintln!("[BUZZER] gpiofind no suministró chip válido");
             return false;
         }
     };
     let line = match parts.next() {
         Some(line) => line.trim(),
         None => {
-            eprintln!("[BUZZER] gpiofind no devolvió una línea válida");
+            eprintln!("[BUZZER] gpiofind no suministró línea válida");
             return false;
         }
     };
@@ -497,7 +575,10 @@ fn set_buzzer_state(on: bool) -> bool {
     {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            eprintln!("[BUZZER] gpioset terminó con código {:?}", status.code());
+            eprintln!(
+                "[BUZZER] gpioset terminó con código {:?}",
+                status.code()
+            );
             false
         }
         Err(err) => {
