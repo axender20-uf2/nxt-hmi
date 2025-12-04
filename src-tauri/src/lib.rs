@@ -575,10 +575,7 @@ fn set_buzzer_gpio(on: bool) -> bool {
     {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            eprintln!(
-                "[BUZZER] gpioset terminó con código {:?}",
-                status.code()
-            );
+            eprintln!("[BUZZER] gpioset terminó con código {:?}", status.code());
             false
         }
         Err(err) => {
