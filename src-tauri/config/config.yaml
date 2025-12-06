@@ -6,6 +6,7 @@ MQTT_CLIENT_ID: hmi-cli
 MQTT_USERNAME: Gmtztj8LRqbdnMbteimu
 MQTT_PASSWORD: 
 MUTE_DURATION: 600
+BUZZER_ENABLED: true
 
 # Configuration ax-server
 # MQTT_SERVER: j0661b06.ala.us-east-1.emqxsl.com
@@ -15,3 +16,4 @@ MUTE_DURATION: 600
 # MQTT_USERNAME: test
 # MQTT_PASSWORD: test
 # MUTE_DURATION: 600
+# BUZZER_ENABLED: true

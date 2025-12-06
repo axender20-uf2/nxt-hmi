@@ -26,3 +26,5 @@ rumqttc = { version = "0.25.1", features = ["use-rustls"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["time"] }
+log = "0.4"
+env_logger = "0.11"

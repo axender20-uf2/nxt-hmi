@@ -1,8 +1,10 @@
 use chrono::{Local, SecondsFormat, Utc};
+use log::{debug, error, info, warn};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
@@ -20,6 +22,7 @@ static BUZZER_CONTROLLER: OnceLock<Mutex<BuzzerController>> = OnceLock::new();
 static MUTE_CONTROLLER: OnceLock<Mutex<MuteController>> = OnceLock::new();
 const MUTE_CHANGED_EVENT: &str = "alerts://mute_changed";
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
+static LOGGER_INITIALIZED: OnceLock<()> = OnceLock::new();
 const CONFIG_PATH: &str = "src-tauri/config/config.yaml";
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -36,6 +39,8 @@ struct AppConfig {
     mqtt_username: String,
     mqtt_password: String,
     mute_duration: u64,
+    #[serde(default = "default_buzzer_enabled")]
+    buzzer_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -48,8 +53,33 @@ impl Default for AppConfig {
             mqtt_username: "test".to_string(),
             mqtt_password: "test".to_string(),
             mute_duration: 600,
+            buzzer_enabled: default_buzzer_enabled(),
         }
     }
+}
+
+fn default_buzzer_enabled() -> bool {
+    true
+}
+
+fn init_logging() {
+    LOGGER_INITIALIZED.get_or_init(|| {
+        let env = env_logger::Env::default().default_filter_or("info");
+        if let Err(err) = env_logger::Builder::from_env(env)
+            .format(|buf, record| {
+                writeln!(
+                    buf,
+                    "[{}][{}] {}",
+                    buf.timestamp_millis(),
+                    record.level(),
+                    record.args()
+                )
+            })
+            .try_init()
+        {
+            eprintln!("[LOG] No se pudo inicializar logger: {:?}", err);
+        }
+    });
 }
 
 fn app_config() -> &'static AppConfig {
@@ -62,7 +92,7 @@ fn load_or_create_config() -> AppConfig {
         Ok(contents) if !contents.trim().is_empty() => match serde_yaml::from_str(&contents) {
             Ok(cfg) => cfg,
             Err(err) => {
-                eprintln!("[CONFIG] Error al parsear {}: {:?}", CONFIG_PATH, err);
+                error!("[CONFIG] Error al parsear {}: {:?}", CONFIG_PATH, err);
                 persist_default_config(path)
             }
         },
@@ -74,7 +104,7 @@ fn persist_default_config(path: &Path) -> AppConfig {
     let default_cfg = AppConfig::default();
     if let Some(parent) = path.parent() {
         if let Err(err) = fs::create_dir_all(parent) {
-            eprintln!("[CONFIG] No se pudo crear carpeta {:?}: {:?}", parent, err);
+            error!("[CONFIG] No se pudo crear carpeta {:?}: {:?}", parent, err);
             return default_cfg;
         }
     }
@@ -82,10 +112,10 @@ fn persist_default_config(path: &Path) -> AppConfig {
     match serde_yaml::to_string(&default_cfg) {
         Ok(yaml) => {
             if let Err(err) = fs::write(path, yaml) {
-                eprintln!("[CONFIG] No se pudo escribir {:?}: {:?}", path, err);
+                error!("[CONFIG] No se pudo escribir {:?}: {:?}", path, err);
             }
         }
-        Err(err) => eprintln!("[CONFIG] No se pudo serializar config por defecto: {:?}", err),
+        Err(err) => error!("[CONFIG] No se pudo serializar config por defecto: {:?}", err),
     }
 
     default_cfg
@@ -93,6 +123,10 @@ fn persist_default_config(path: &Path) -> AppConfig {
 
 fn mute_duration() -> Duration {
     Duration::from_secs(app_config().mute_duration.max(1))
+}
+
+fn is_buzzer_enabled() -> bool {
+    app_config().buzzer_enabled
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -246,7 +280,7 @@ fn format_deadline(deadline: Option<SystemTime>) -> Option<String> {
 
 fn emit_mute_state(app_handle: &tauri::AppHandle, payload: &MuteStatePayload) {
     if let Err(err) = app_handle.emit(MUTE_CHANGED_EVENT, payload) {
-        eprintln!("[MUTE] No se pudo emitir estado mute: {:?}", err);
+        warn!("[MUTE] No se pudo emitir estado mute: {:?}", err);
     }
 }
 
@@ -430,9 +464,9 @@ fn alert_from_params(params: &AlarmParams) -> Alert {
 
 fn emit_alert_added(app_handle: &tauri::AppHandle, alert: &Alert) {
     if let Err(err) = app_handle.emit(ALERT_ADDED_EVENT, alert) {
-        eprintln!(
-            "[MQTT] No se pudo emitir evento de alerta agregada: {:?}",
-            err
+        warn!(
+            "[ALERT] No se pudo emitir evento de alerta agregada {}: {:?}",
+            alert.id, err
         );
     }
 }
@@ -440,15 +474,19 @@ fn emit_alert_added(app_handle: &tauri::AppHandle, alert: &Alert) {
 fn emit_alert_removed(app_handle: &tauri::AppHandle, id: &str) {
     let payload = AlertRemovalEvent { id: id.to_string() };
     if let Err(err) = app_handle.emit(ALERT_REMOVED_EVENT, &payload) {
-        eprintln!(
-            "[MQTT] No se pudo emitir evento de alerta eliminada: {:?}",
-            err
+        warn!(
+            "[ALERT] No se pudo emitir evento de alerta eliminada {}: {:?}",
+            id, err
         );
     }
 }
 
 fn handle_active_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
     let alert = alert_from_params(&params);
+    info!(
+        "[ALERT] ACTIVADA {} tipo={} dispositivo={}",
+        alert.id, params.alarm_type, params.originator_name
+    );
     cache_alert(&alert);
     handle_alert_activation_side_effects(app_handle);
     emit_alert_added(app_handle, &alert);
@@ -457,10 +495,19 @@ fn handle_active_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
 fn handle_cleared_alarm(params: AlarmParams, app_handle: &tauri::AppHandle) {
     let alert_id = params.id.value;
     if remove_alert_by_id(&alert_id).is_some() {
+        info!(
+            "[ALERT] LIBERADA {} tipo={} dispositivo={}",
+            alert_id, params.alarm_type, params.originator_name
+        );
         emit_alert_removed(app_handle, &alert_id);
         if !has_active_alerts() {
             handle_no_active_alerts(app_handle);
         }
+    } else {
+        debug!(
+            "[ALERT] Se recibió CLEAR para {}, pero no existe en cache",
+            alert_id
+        );
     }
 }
 
@@ -468,12 +515,16 @@ fn handle_rpc_payload(payload: &[u8], app_handle: &tauri::AppHandle) {
     let envelope: AlarmRpcEnvelope = match serde_json::from_slice(payload) {
         Ok(data) => data,
         Err(err) => {
-            eprintln!("[MQTT] No se pudo parsear payload RPC: {:?}", err);
+            warn!("[MQTT] No se pudo parsear payload RPC: {:?}", err);
             return;
         }
     };
 
     if !envelope.method.eq_ignore_ascii_case("ALARM") {
+        debug!(
+            "[MQTT] Método RPC ignorado: {}",
+            envelope.method
+        );
         return;
     }
 
@@ -481,7 +532,7 @@ fn handle_rpc_payload(payload: &[u8], app_handle: &tauri::AppHandle) {
         AlarmStatus::ActiveUnack => handle_active_alarm(envelope.params, app_handle),
         AlarmStatus::ClearedUnack => handle_cleared_alarm(envelope.params, app_handle),
         AlarmStatus::Unknown => {
-            println!("[MQTT] Estado de alarma no manejado, se ignora payload.");
+            warn!("[MQTT] Estado de alarma no manejado, se ignora payload.");
         }
     }
 }
@@ -540,9 +591,19 @@ fn toggle_alerts_mute(app_handle: tauri::AppHandle) -> MuteStatePayload {
 
 /// Controla el estado del buzzer. Cuando se enciende, parpadea cada segundo.
 fn set_buzzer_state(on: bool) -> bool {
+    if !is_buzzer_enabled() {
+        debug!("[BUZZER] Cambio de estado ignorado (deshabilitado)");
+        if !on {
+            stop_buzzer_blinking();
+        }
+        return true;
+    }
+
     if on {
+        info!("[BUZZER] Activado");
         start_buzzer_blinking()
     } else {
+        info!("[BUZZER] Desactivado");
         stop_buzzer_blinking()
     }
 }
@@ -562,7 +623,7 @@ fn start_buzzer_blinking() -> bool {
             tokio::time::sleep(Duration::from_secs(1)).await;
             level = !level;
             if !set_buzzer_gpio(level) {
-                eprintln!("[BUZZER] Falló al alternar nivel {}", level as u8);
+                warn!("[BUZZER] Fallo al alternar nivel {}", level as u8);
             }
         }
     });
@@ -578,7 +639,6 @@ fn start_buzzer_blinking() -> bool {
     });
 
     if !was_set {
-        // Otro hilo inició el parpadeo; abortamos este para evitar duplicados.
         if let Some(handle) = handle_slot {
             handle.abort();
         }
@@ -601,14 +661,14 @@ fn set_buzzer_gpio(on: bool) -> bool {
     let gpiofind_output = match Command::new("gpiofind").arg("BUZZER_EN").output() {
         Ok(output) => output,
         Err(err) => {
-            eprintln!("[BUZZER] No se pudo ejecutar gpiofind: {:?}", err);
+            error!("[BUZZER] No se pudo ejecutar gpiofind: {:?}", err);
             return false;
         }
     };
 
     if !gpiofind_output.status.success() {
-        eprintln!(
-            "[BUZZER] gpiofind devolvió código {:?}: {}",
+        error!(
+            "[BUZZER] gpiofind devolvio codigo {:?}: {}",
             gpiofind_output.status.code(),
             String::from_utf8_lossy(&gpiofind_output.stderr)
         );
@@ -620,14 +680,14 @@ fn set_buzzer_gpio(on: bool) -> bool {
     let chip = match parts.next() {
         Some(chip) => chip.trim(),
         None => {
-            eprintln!("[BUZZER] gpiofind no suministró chip válido");
+            error!("[BUZZER] gpiofind no entrego chip valido");
             return false;
         }
     };
     let line = match parts.next() {
         Some(line) => line.trim(),
         None => {
-            eprintln!("[BUZZER] gpiofind no suministró línea válida");
+            error!("[BUZZER] gpiofind no entrego linea valida");
             return false;
         }
     };
@@ -639,15 +699,16 @@ fn set_buzzer_gpio(on: bool) -> bool {
     {
         Ok(status) if status.success() => true,
         Ok(status) => {
-            eprintln!("[BUZZER] gpioset terminó con código {:?}", status.code());
+            error!("[BUZZER] gpioset termino con codigo {:?}", status.code());
             false
         }
         Err(err) => {
-            eprintln!("[BUZZER] No se pudo ejecutar gpioset: {:?}", err);
+            error!("[BUZZER] No se pudo ejecutar gpioset: {:?}", err);
             false
         }
     }
 }
+
 
 fn build_mqtt_options() -> Option<MqttOptions> {
     let cfg = app_config();
@@ -664,7 +725,7 @@ fn build_mqtt_options() -> Option<MqttOptions> {
         let ca_bytes = match fs::read(ca_path) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[MQTT] No se pudo leer CA en {}: {:?}", ca_path, e);
+                error!("[MQTT] No se pudo leer CA en {}: {:?}", ca_path, e);
                 return None;
             }
         };
@@ -684,7 +745,7 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
         MQTT_CONNECTED.store(false, Ordering::SeqCst);
 
         let Some(mqttoptions) = build_mqtt_options() else {
-            eprintln!(
+            error!(
                 "[MQTT] No se pudieron construir las opciones MQTT. Reintentando en {:?}...",
                 MQTT_RETRY_DELAY
             );
@@ -693,7 +754,7 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
         };
 
         let cfg = app_config();
-        println!(
+        info!(
             "[MQTT] Intentando conectar ({}) con {}:{} como {}",
             if cfg.mqtt_use_secure_client { "TLS" } else { "TCP" },
             cfg.mqtt_server.as_str(),
@@ -704,7 +765,7 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
         let (client, mut connection) = Client::new(mqttoptions, 10);
 
         if let Err(err) = client.subscribe(MQTT_RPC_REQUEST_TOPIC, QoS::AtLeastOnce) {
-            eprintln!(
+            error!(
                 "[MQTT] No se pudo suscribir a {}: {:?}. Reintentando en {:?}...",
                 MQTT_RPC_REQUEST_TOPIC, err, MQTT_RETRY_DELAY
             );
@@ -712,7 +773,7 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
             continue;
         }
 
-        println!(
+        info!(
             "[MQTT] Suscrito a solicitudes RPC en {}",
             MQTT_RPC_REQUEST_TOPIC
         );
@@ -725,20 +786,20 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
                 }
                 Ok(Event::Incoming(pkt)) => {
                     MQTT_CONNECTED.store(true, Ordering::SeqCst);
-                    println!("[MQTT] Evento entrante: {:?}", pkt);
+                    debug!("[MQTT] Evento entrante: {:?}", pkt);
                 }
                 Ok(Event::Outgoing(pkt)) => {
-                    println!("[MQTT] Evento saliente: {:?}", pkt);
+                    debug!("[MQTT] Evento saliente: {:?}", pkt);
                 }
                 Err(e) => {
-                    eprintln!("[MQTT] Error en loop: {:?}", e);
+                    error!("[MQTT] Error en loop: {:?}", e);
                     MQTT_CONNECTED.store(false, Ordering::SeqCst);
                     break;
                 }
             }
         }
 
-        eprintln!(
+        warn!(
             "[MQTT] Loop MQTT finalizado. Reintentando en {:?}...",
             MQTT_RETRY_DELAY
         );
@@ -754,6 +815,7 @@ fn is_mqtt_connected() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
