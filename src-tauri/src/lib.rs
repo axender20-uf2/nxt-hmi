@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -18,18 +19,81 @@ const ALERT_REMOVED_EVENT: &str = "alerts://removed";
 static BUZZER_CONTROLLER: OnceLock<Mutex<BuzzerController>> = OnceLock::new();
 static MUTE_CONTROLLER: OnceLock<Mutex<MuteController>> = OnceLock::new();
 const MUTE_CHANGED_EVENT: &str = "alerts://mute_changed";
-const MUTE_DURATION: Duration = Duration::from_secs(600);
+static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
+const CONFIG_PATH: &str = "src-tauri/config/config.yaml";
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
-
-// Configuración de conexión MQTT (alineada con MQTTX)
-pub const MQTT_SERVER: &str = "j0661b06.ala.us-east-1.emqxsl.com";
-pub const MQTT_PORT: u16 = 8883;
-pub const MQTT_CLIENT_ID: &str = "hmi-cli";
-pub const MQTT_USERNAME: &str = "test";
-pub const MQTT_PASSWORD: &str = "test";
 pub const MQTT_RPC_REQUEST_TOPIC: &str = "v1/devices/me/rpc/request/+";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+struct AppConfig {
+    mqtt_server: String,
+    mqtt_use_secure_client: bool,
+    mqtt_port: u16,
+    mqtt_client_id: String,
+    mqtt_username: String,
+    mqtt_password: String,
+    mute_duration: u64,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            mqtt_server: "j0661b06.ala.us-east-1.emqxsl.com".to_string(),
+            mqtt_use_secure_client: true,
+            mqtt_port: 8883,
+            mqtt_client_id: "hmi-cli".to_string(),
+            mqtt_username: "test".to_string(),
+            mqtt_password: "test".to_string(),
+            mute_duration: 600,
+        }
+    }
+}
+
+fn app_config() -> &'static AppConfig {
+    APP_CONFIG.get_or_init(load_or_create_config)
+}
+
+fn load_or_create_config() -> AppConfig {
+    let path = Path::new(CONFIG_PATH);
+    match fs::read_to_string(path) {
+        Ok(contents) if !contents.trim().is_empty() => match serde_yaml::from_str(&contents) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                eprintln!("[CONFIG] Error al parsear {}: {:?}", CONFIG_PATH, err);
+                persist_default_config(path)
+            }
+        },
+        _ => persist_default_config(path),
+    }
+}
+
+fn persist_default_config(path: &Path) -> AppConfig {
+    let default_cfg = AppConfig::default();
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("[CONFIG] No se pudo crear carpeta {:?}: {:?}", parent, err);
+            return default_cfg;
+        }
+    }
+
+    match serde_yaml::to_string(&default_cfg) {
+        Ok(yaml) => {
+            if let Err(err) = fs::write(path, yaml) {
+                eprintln!("[CONFIG] No se pudo escribir {:?}: {:?}", path, err);
+            }
+        }
+        Err(err) => eprintln!("[CONFIG] No se pudo serializar config por defecto: {:?}", err),
+    }
+
+    default_cfg
+}
+
+fn mute_duration() -> Duration {
+    Duration::from_secs(app_config().mute_duration.max(1))
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AlertType {
@@ -195,7 +259,7 @@ fn cancel_mute_timer(ctrl: &mut MuteController) {
 fn schedule_mute_timer(app_handle: &tauri::AppHandle) -> JoinHandle<()> {
     let app_handle = app_handle.clone();
     async_runtime::spawn(async move {
-        tokio::time::sleep(MUTE_DURATION).await;
+        tokio::time::sleep(mute_duration()).await;
         handle_mute_timeout(app_handle);
     })
 }
@@ -254,7 +318,7 @@ fn force_unmute(app_handle: &tauri::AppHandle) -> Option<MuteStatePayload> {
 
 fn mute_alerts_internal(app_handle: &tauri::AppHandle) -> MuteStatePayload {
     let expires_at = SystemTime::now()
-        .checked_add(MUTE_DURATION)
+        .checked_add(mute_duration())
         .unwrap_or_else(|| SystemTime::now());
     let timer = schedule_mute_timer(app_handle);
 
@@ -586,24 +650,31 @@ fn set_buzzer_gpio(on: bool) -> bool {
 }
 
 fn build_mqtt_options() -> Option<MqttOptions> {
-    let ca_path = "certs/emqxsl-ca.crt";
-    let ca_bytes = match fs::read(ca_path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[MQTT] No se pudo leer CA en {}: {:?}", ca_path, e);
-            return None;
-        }
-    };
-
-    let mut mqttoptions = MqttOptions::new(MQTT_CLIENT_ID, MQTT_SERVER, MQTT_PORT);
-    mqttoptions.set_credentials(MQTT_USERNAME, MQTT_PASSWORD);
+    let cfg = app_config();
+    let mut mqttoptions = MqttOptions::new(
+        cfg.mqtt_client_id.as_str(),
+        cfg.mqtt_server.as_str(),
+        cfg.mqtt_port,
+    );
+    mqttoptions.set_credentials(cfg.mqtt_username.as_str(), cfg.mqtt_password.as_str());
     mqttoptions.set_keep_alive(Duration::from_secs(60));
-    let tls_cfg = TlsConfiguration::Simple {
-        ca: ca_bytes,
-        alpn: Some(vec![b"mqtt".to_vec()]),
-        client_auth: None,
-    };
-    mqttoptions.set_transport(Transport::tls_with_config(tls_cfg));
+
+    if cfg.mqtt_use_secure_client {
+        let ca_path = "certs/emqxsl-ca.crt";
+        let ca_bytes = match fs::read(ca_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[MQTT] No se pudo leer CA en {}: {:?}", ca_path, e);
+                return None;
+            }
+        };
+        let tls_cfg = TlsConfiguration::Simple {
+            ca: ca_bytes,
+            alpn: Some(vec![b"mqtt".to_vec()]),
+            client_auth: None,
+        };
+        mqttoptions.set_transport(Transport::tls_with_config(tls_cfg));
+    }
 
     Some(mqttoptions)
 }
@@ -621,9 +692,13 @@ fn start_mqtt_loop(app_handle: tauri::AppHandle) {
             continue;
         };
 
+        let cfg = app_config();
         println!(
-            "[MQTT] Intentando conectar (TLS) con {}:{} como {}",
-            MQTT_SERVER, MQTT_PORT, MQTT_CLIENT_ID
+            "[MQTT] Intentando conectar ({}) con {}:{} como {}",
+            if cfg.mqtt_use_secure_client { "TLS" } else { "TCP" },
+            cfg.mqtt_server.as_str(),
+            cfg.mqtt_port,
+            cfg.mqtt_client_id.as_str()
         );
 
         let (client, mut connection) = Client::new(mqttoptions, 10);

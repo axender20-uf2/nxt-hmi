@@ -308,7 +308,7 @@ export function TemperatureDashboard() {
         </div>
 
         <div className="flex items-center justify-end gap-6">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-5">
             <button
               className="group transition-all"
               title={
@@ -318,9 +318,9 @@ export function TemperatureDashboard() {
               }
             >
               {isInternetConnected ? (
-                <Wifi className="h-5 w-5 text-white transition-transform duration-300 group-hover:scale-110" />
+                <Wifi className="h-9 w-9 text-white transition-transform duration-300 group-hover:scale-110" />
               ) : (
-                <WifiOff className="h-5 w-5 text-red-500 animate-pulse" />
+                <WifiOff className="h-9 w-9 text-red-500 animate-pulse" />
               )}
             </button>
 
@@ -335,8 +335,8 @@ export function TemperatureDashboard() {
               <Server
                 className={
                   isServerConnected
-                    ? "h-5 w-5 text-white transition-transform duration-300 group-hover:scale-110"
-                    : "h-5 w-5 text-red-500 animate-pulse"
+                    ? "h-9 w-9 text-white transition-transform duration-300 group-hover:scale-110"
+                    : "h-9 w-9 text-red-500 animate-pulse"
                 }
               />
             </button>
@@ -344,32 +344,29 @@ export function TemperatureDashboard() {
             <button
               onClick={() => setIsDarkMode(!isDarkMode)}
               className="group transition-all"
-              title={
-                isDarkMode ? "Cambiar a modo claro" : "Cambiar a modo oscuro"
-              }
             >
               {isDarkMode ? (
-                <Sun className="h-5 w-5 text-white" />
+                <Sun className="h-9 w-9 text-white" />
               ) : (
-                <Moon className="h-5 w-5 text-white" />
+                <Moon className="h-9 w-9 text-white" />
               )}
             </button>
           </div>
 
           <button
             onClick={handleToggleMute}
-            disabled={muteButtonDisabled}
             className={`text-white/90 transition-all hover:text-white hover:scale-110 active:scale-95 ${
               muteButtonDisabled
                 ? "opacity-40 cursor-not-allowed hover:scale-100"
                 : ""
             }`}
             title={muteTooltip}
+            disabled={muteButtonDisabled}
           >
             {isMuted ? (
-              <VolumeX className="h-6 w-6" />
+              <VolumeX className="h-10 w-10" />
             ) : (
-              <Volume2 className="h-6 w-6" />
+              <Volume2 className="h-10 w-10" />
             )}
           </button>
         </div>

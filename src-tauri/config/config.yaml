@@ -1,0 +1,17 @@
+# Configuration hmi-cli (thingsboard cloud)
+MQTT_SERVER: mqtt.thingsboard.cloud
+MQTT_USE_SECURE_CLIENT: false
+MQTT_PORT: 1883
+MQTT_CLIENT_ID: hmi-cli
+MQTT_USERNAME: Gmtztj8LRqbdnMbteimu
+MQTT_PASSWORD: 
+MUTE_DURATION: 600
+
+# Configuration ax-server
+# MQTT_SERVER: j0661b06.ala.us-east-1.emqxsl.com
+# MQTT_USE_SECURE_CLIENT: true
+# MQTT_PORT: 8883
+# MQTT_CLIENT_ID: hmi-cli
+# MQTT_USERNAME: test
+# MQTT_PASSWORD: test
+# MUTE_DURATION: 600
