@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tauri::async_runtime::{self, JoinHandle};
-use tauri::Emitter;
+use tauri::{Emitter, WindowEvent};
 
 static ALERT_STORE: OnceLock<Mutex<HashMap<String, Alert>>> = OnceLock::new();
 const ALERT_ADDED_EVENT: &str = "alerts://added";
@@ -27,7 +27,12 @@ const CONFIG_PATH: &str = "src-tauri/config/config.yaml";
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MQTT_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 pub const MQTT_RPC_REQUEST_TOPIC: &str = "v1/devices/me/rpc/request/+";
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+const BUZZER_FAILURE_LIMIT: u8 = 5;
+const SLEEP_CHUNK: Duration = Duration::from_millis(200);
+static BUZZER_GPIO_CACHE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -127,6 +132,38 @@ fn mute_duration() -> Duration {
 
 fn is_buzzer_enabled() -> bool {
     app_config().buzzer_enabled
+}
+
+fn buzzer_gpio_cache() -> &'static Mutex<Option<(String, String)>> {
+    BUZZER_GPIO_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn is_shutting_down() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
+}
+
+fn next_retry_delay(current: Duration) -> Duration {
+    (current * 2).min(MQTT_MAX_RETRY_DELAY)
+}
+
+fn sleep_with_shutdown(total: Duration) {
+    let mut elapsed = Duration::ZERO;
+    while elapsed < total {
+        if is_shutting_down() {
+            break;
+        }
+        let remaining = total.saturating_sub(elapsed);
+        let slice = if remaining < SLEEP_CHUNK {
+            remaining
+        } else {
+            SLEEP_CHUNK
+        };
+        if slice.is_zero() {
+            break;
+        }
+        thread::sleep(slice);
+        elapsed = elapsed.saturating_add(slice);
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -589,23 +626,95 @@ fn toggle_alerts_mute(app_handle: tauri::AppHandle) -> MuteStatePayload {
     }
 }
 
+fn invalidate_buzzer_line() {
+    if let Some(cache) = BUZZER_GPIO_CACHE.get() {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
+}
+
+fn resolve_buzzer_line() -> Option<(String, String)> {
+    if let Some(cache) = BUZZER_GPIO_CACHE.get() {
+        if let Some(pair) = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Some(pair);
+        }
+    }
+
+    let gpiofind_output = match Command::new("gpiofind").arg("BUZZER_EN").output() {
+        Ok(output) => output,
+        Err(err) => {
+            error!("[BUZZER] No se pudo ejecutar gpiofind: {:?}", err);
+            return None;
+        }
+    };
+
+    if !gpiofind_output.status.success() {
+        error!(
+            "[BUZZER] gpiofind devolvio codigo {:?}: {}",
+            gpiofind_output.status.code(),
+            String::from_utf8_lossy(&gpiofind_output.stderr)
+        );
+        return None;
+    }
+
+    let location = String::from_utf8_lossy(&gpiofind_output.stdout).to_string();
+    let mut parts = location.split_whitespace();
+    let chip = match parts.next() {
+        Some(chip) => chip.trim().to_string(),
+        None => {
+            error!("[BUZZER] gpiofind no entrego chip valido");
+            return None;
+        }
+    };
+    let line = match parts.next() {
+        Some(line) => line.trim().to_string(),
+        None => {
+            error!("[BUZZER] gpiofind no entrego linea valida");
+            return None;
+        }
+    };
+
+    let pair = (chip, line);
+    let cache = buzzer_gpio_cache();
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(pair.clone());
+    Some(pair)
+}
+
 /// Controla el estado del buzzer. Cuando se enciende, parpadea cada segundo.
 fn set_buzzer_state(on: bool) -> bool {
     if !is_buzzer_enabled() {
         debug!("[BUZZER] Cambio de estado ignorado (deshabilitado)");
         if !on {
-            stop_buzzer_blinking();
+            let _ = stop_buzzer_blinking();
         }
         return true;
     }
 
-    if on {
+    let result = if on {
         info!("[BUZZER] Activado");
         start_buzzer_blinking()
     } else {
         info!("[BUZZER] Desactivado");
         stop_buzzer_blinking()
+    };
+
+    if !result {
+        error!(
+            "[BUZZER] No se pudo cambiar estado a {}",
+            if on { "ON" } else { "OFF" }
+        );
     }
+
+    result
 }
 
 fn start_buzzer_blinking() -> bool {
@@ -619,13 +728,29 @@ fn start_buzzer_blinking() -> bool {
 
     let handle = async_runtime::spawn(async move {
         let mut level = false;
+        let mut consecutive_failures: u8 = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if is_shutting_down() {
+                break;
+            }
             level = !level;
-            if !set_buzzer_gpio(level) {
+            if set_buzzer_gpio(level) {
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures = consecutive_failures.saturating_add(1);
                 warn!("[BUZZER] Fallo al alternar nivel {}", level as u8);
+                if consecutive_failures >= BUZZER_FAILURE_LIMIT {
+                    error!(
+                        "[BUZZER] Se desactiva parpadeo tras {} errores consecutivos",
+                        BUZZER_FAILURE_LIMIT
+                    );
+                    break;
+                }
             }
         }
+
+        let _ = set_buzzer_gpio(false);
     });
 
     let mut handle_slot = Some(handle);
@@ -658,55 +783,36 @@ fn stop_buzzer_blinking() -> bool {
 fn set_buzzer_gpio(on: bool) -> bool {
     let level = if on { "1" } else { "0" };
 
-    let gpiofind_output = match Command::new("gpiofind").arg("BUZZER_EN").output() {
-        Ok(output) => output,
-        Err(err) => {
-            error!("[BUZZER] No se pudo ejecutar gpiofind: {:?}", err);
-            return false;
-        }
-    };
-
-    if !gpiofind_output.status.success() {
-        error!(
-            "[BUZZER] gpiofind devolvio codigo {:?}: {}",
-            gpiofind_output.status.code(),
-            String::from_utf8_lossy(&gpiofind_output.stderr)
-        );
-        return false;
-    }
-
-    let location = String::from_utf8_lossy(&gpiofind_output.stdout);
-    let mut parts = location.split_whitespace();
-    let chip = match parts.next() {
-        Some(chip) => chip.trim(),
-        None => {
-            error!("[BUZZER] gpiofind no entrego chip valido");
-            return false;
-        }
-    };
-    let line = match parts.next() {
-        Some(line) => line.trim(),
-        None => {
-            error!("[BUZZER] gpiofind no entrego linea valida");
-            return false;
-        }
+    let (chip, line) = match resolve_buzzer_line() {
+        Some(pair) => pair,
+        None => return false,
     };
 
     match Command::new("gpioset")
-        .arg(chip)
+        .arg(&chip)
         .arg(format!("{}={}", line, level))
         .status()
     {
         Ok(status) if status.success() => true,
         Ok(status) => {
             error!("[BUZZER] gpioset termino con codigo {:?}", status.code());
+            invalidate_buzzer_line();
             false
         }
         Err(err) => {
             error!("[BUZZER] No se pudo ejecutar gpioset: {:?}", err);
+            invalidate_buzzer_line();
             false
         }
     }
+}
+
+fn request_shutdown() {
+    if !SHUTDOWN.swap(true, Ordering::SeqCst) {
+        info!("[CORE] Shutdown solicitado");
+    }
+    MQTT_CONNECTED.store(false, Ordering::SeqCst);
+    let _ = stop_buzzer_blinking();
 }
 
 
@@ -741,71 +847,94 @@ fn build_mqtt_options() -> Option<MqttOptions> {
 }
 
 fn start_mqtt_loop(app_handle: tauri::AppHandle) {
-    thread::spawn(move || loop {
-        MQTT_CONNECTED.store(false, Ordering::SeqCst);
+    if let Err(err) = thread::Builder::new()
+        .name("mqtt-loop".to_string())
+        .spawn(move || {
+            let mut retry_delay = MQTT_RETRY_DELAY;
+            while !is_shutting_down() {
+                MQTT_CONNECTED.store(false, Ordering::SeqCst);
 
-        let Some(mqttoptions) = build_mqtt_options() else {
-            error!(
-                "[MQTT] No se pudieron construir las opciones MQTT. Reintentando en {:?}...",
-                MQTT_RETRY_DELAY
-            );
-            thread::sleep(MQTT_RETRY_DELAY);
-            continue;
-        };
+                let Some(mqttoptions) = build_mqtt_options() else {
+                    error!(
+                        "[MQTT] No se pudieron construir las opciones MQTT. Reintentando en {:?}...",
+                        retry_delay
+                    );
+                    sleep_with_shutdown(retry_delay);
+                    retry_delay = next_retry_delay(retry_delay);
+                    continue;
+                };
 
-        let cfg = app_config();
-        info!(
-            "[MQTT] Intentando conectar ({}) con {}:{} como {}",
-            if cfg.mqtt_use_secure_client { "TLS" } else { "TCP" },
-            cfg.mqtt_server.as_str(),
-            cfg.mqtt_port,
-            cfg.mqtt_client_id.as_str()
-        );
+                let cfg = app_config();
+                info!(
+                    "[MQTT] Intentando conectar ({}) con {}:{} como {}",
+                    if cfg.mqtt_use_secure_client { "TLS" } else { "TCP" },
+                    cfg.mqtt_server.as_str(),
+                    cfg.mqtt_port,
+                    cfg.mqtt_client_id.as_str()
+                );
 
-        let (client, mut connection) = Client::new(mqttoptions, 10);
+                let (client, mut connection) = Client::new(mqttoptions, 10);
 
-        if let Err(err) = client.subscribe(MQTT_RPC_REQUEST_TOPIC, QoS::AtLeastOnce) {
-            error!(
-                "[MQTT] No se pudo suscribir a {}: {:?}. Reintentando en {:?}...",
-                MQTT_RPC_REQUEST_TOPIC, err, MQTT_RETRY_DELAY
-            );
-            thread::sleep(MQTT_RETRY_DELAY);
-            continue;
-        }
-
-        info!(
-            "[MQTT] Suscrito a solicitudes RPC en {}",
-            MQTT_RPC_REQUEST_TOPIC
-        );
-
-        for event in connection.iter() {
-            match event {
-                Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    MQTT_CONNECTED.store(true, Ordering::SeqCst);
-                    handle_rpc_payload(&publish.payload, &app_handle);
+                if let Err(err) = client.subscribe(MQTT_RPC_REQUEST_TOPIC, QoS::AtLeastOnce) {
+                    error!(
+                        "[MQTT] No se pudo suscribir a {}: {:?}. Reintentando en {:?}...",
+                        MQTT_RPC_REQUEST_TOPIC, err, retry_delay
+                    );
+                    sleep_with_shutdown(retry_delay);
+                    retry_delay = next_retry_delay(retry_delay);
+                    continue;
                 }
-                Ok(Event::Incoming(pkt)) => {
-                    MQTT_CONNECTED.store(true, Ordering::SeqCst);
-                    debug!("[MQTT] Evento entrante: {:?}", pkt);
+
+                info!(
+                    "[MQTT] Suscrito a solicitudes RPC en {}",
+                    MQTT_RPC_REQUEST_TOPIC
+                );
+                retry_delay = MQTT_RETRY_DELAY;
+
+                for event in connection.iter() {
+                    if is_shutting_down() {
+                        info!("[MQTT] Loop detenido por shutdown");
+                        break;
+                    }
+
+                    match event {
+                        Ok(Event::Incoming(Packet::Publish(publish))) => {
+                            MQTT_CONNECTED.store(true, Ordering::SeqCst);
+                            handle_rpc_payload(&publish.payload, &app_handle);
+                        }
+                        Ok(Event::Incoming(pkt)) => {
+                            MQTT_CONNECTED.store(true, Ordering::SeqCst);
+                            debug!("[MQTT] Evento entrante: {:?}", pkt);
+                        }
+                        Ok(Event::Outgoing(pkt)) => {
+                            debug!("[MQTT] Evento saliente: {:?}", pkt);
+                        }
+                        Err(e) => {
+                            error!("[MQTT] Error en loop: {:?}", e);
+                            MQTT_CONNECTED.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                    }
                 }
-                Ok(Event::Outgoing(pkt)) => {
-                    debug!("[MQTT] Evento saliente: {:?}", pkt);
-                }
-                Err(e) => {
-                    error!("[MQTT] Error en loop: {:?}", e);
-                    MQTT_CONNECTED.store(false, Ordering::SeqCst);
+
+                if is_shutting_down() {
                     break;
                 }
+
+                warn!(
+                    "[MQTT] Loop MQTT finalizado. Reintentando en {:?}...",
+                    retry_delay
+                );
+
+                sleep_with_shutdown(retry_delay);
+                retry_delay = next_retry_delay(retry_delay);
             }
-        }
 
-        warn!(
-            "[MQTT] Loop MQTT finalizado. Reintentando en {:?}...",
-            MQTT_RETRY_DELAY
-        );
-
-        thread::sleep(MQTT_RETRY_DELAY);
-    });
+            info!("[MQTT] Loop terminado");
+        })
+    {
+        error!("[MQTT] No se pudo iniciar hilo de conexion: {:?}", err);
+    }
 }
 
 #[tauri::command]
@@ -818,6 +947,12 @@ pub fn run() {
     init_logging();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|_, event| match event {
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
+                request_shutdown();
+            }
+            _ => {}
+        })
         .invoke_handler(tauri::generate_handler![
             get_active_alerts,
             remove_alert,
@@ -827,7 +962,8 @@ pub fn run() {
             is_mqtt_connected
         ])
         .setup(|app| {
-            start_mqtt_loop(app.handle().clone());
+            let app_handle = app.handle();
+            start_mqtt_loop(app_handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
