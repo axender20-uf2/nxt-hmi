@@ -297,7 +297,7 @@ export function TemperatureDashboard() {
           </Button>
 
           <span className="text-base font-semibold text-white">
-            Proyecto HMI
+            Panel HMI
           </span>
         </div>
 
@@ -399,7 +399,7 @@ export function TemperatureDashboard() {
             <div className="space-y-3 text-sm">
               <h2 className="text-lg font-bold">SEIMEG – HMI Panel</h2>
               <p>
-                <span className="font-semibold">Versión:</span> 1.0.0
+                <span className="font-semibold">Versión:</span> 1.0.1
               </p>
               <p>
                 <span className="font-semibold">Desarrollador:</span> axender20

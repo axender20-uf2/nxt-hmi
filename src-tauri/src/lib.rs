@@ -1,4 +1,5 @@
-use chrono::{Local, SecondsFormat, Utc};
+use anyhow::Result;
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat, Utc};
 use log::{debug, error, info, warn};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
+use supabase_realtime_rs::{
+    PostgresChangeEvent, PostgresChangesFilter, RealtimeClient, RealtimeClientOptions,
+};
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{Emitter, WindowEvent};
 
@@ -23,16 +27,37 @@ static MUTE_CONTROLLER: OnceLock<Mutex<MuteController>> = OnceLock::new();
 const MUTE_CHANGED_EVENT: &str = "alerts://mute_changed";
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
 static LOGGER_INITIALIZED: OnceLock<()> = OnceLock::new();
-const CONFIG_PATH: &str = "src-tauri/config/config.yaml";
+const CONFIG_PATH: &str = "config/config.yaml";
 
 static MQTT_CONNECTED: AtomicBool = AtomicBool::new(false);
 const MQTT_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MQTT_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 pub const MQTT_RPC_REQUEST_TOPIC: &str = "v1/devices/me/rpc/request/+";
+
+static SUPABASE_CONNECTED: AtomicBool = AtomicBool::new(false);
+const SUPABASE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const SUPABASE_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const SUPABASE_CHANNEL_NAME: &str = "schema-db-changes";
+const SUPABASE_DB_SCHEMA: &str = "public";
+const BINARY_ARRAY_SIZE: usize = 6;
+const DEVICE_STATUS_EVENT: &str = "device://status_changed";
+
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 const BUZZER_FAILURE_LIMIT: u8 = 5;
 const SLEEP_CHUNK: Duration = Duration::from_millis(200);
 static BUZZER_GPIO_CACHE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+
+const REFRIGERATOR_NAMES: [&str; 6] = [
+    "Bodega - microbiología refri 2",
+    "Bodega - microbiología refri 1",
+    "Bodega - química refri 1",
+    "Bodega - banco de sangre",
+    "Bodega - química refri 2",
+    "Bodega - Inmunología refri 1",
+];
+const TEMPERATURE_ALARM_TYPE: &str = "Temperature out of range";
+const TEMPERATURE_ALARM_DESCRIPTION: &str = "Temperatura fuera de rango 2 - 8 °C";
+static REFRIGERATOR_ALARM_STATE: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -46,6 +71,10 @@ struct AppConfig {
     mute_duration: u64,
     #[serde(default = "default_buzzer_enabled")]
     buzzer_enabled: bool,
+    #[serde(default)]
+    supabase_url: String,
+    #[serde(default)]
+    supabase_anon_key: String,
 }
 
 impl Default for AppConfig {
@@ -59,6 +88,8 @@ impl Default for AppConfig {
             mqtt_password: "test".to_string(),
             mute_duration: 600,
             buzzer_enabled: default_buzzer_enabled(),
+            supabase_url: String::new(),
+            supabase_anon_key: String::new(),
         }
     }
 }
@@ -228,6 +259,23 @@ enum AlarmStatus {
     ClearedUnack,
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupabaseUpdatePayload {
+    commit_timestamp: String,
+    new: SupabaseNewData,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupabaseNewData {
+    message: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct DeviceStatusUpdate {
+    timestamp: String,
+    status: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -449,6 +497,42 @@ fn snapshot_alerts() -> Vec<Alert> {
     with_alert_store(|store| store.values().cloned().collect())
 }
 
+fn validate_binary_array(message: &str) -> Result<Vec<u8>> {
+    let values: Vec<u8> = serde_json::from_str(message)
+        .map_err(|e| anyhow::anyhow!("Formato JSON inválido: {}", e))?;
+
+    if values.len() != BINARY_ARRAY_SIZE {
+        return Err(anyhow::anyhow!(
+            "El array debe tener exactamente {} elementos, pero tiene {}",
+            BINARY_ARRAY_SIZE,
+            values.len()
+        ));
+    }
+
+    for (index, &value) in values.iter().enumerate() {
+        if value != 0 && value != 1 {
+            return Err(anyhow::anyhow!(
+                "El elemento en posición {} tiene valor {}, debe ser 0 o 1",
+                index, value
+            ));
+        }
+    }
+
+    Ok(values)
+}
+
+fn parse_supabase_timestamp(timestamp: &str) -> String {
+    let guatemala_tz = FixedOffset::west_opt(6 * 3600).unwrap_or_else(|| FixedOffset::west_opt(0).unwrap());
+    
+    match timestamp.parse::<DateTime<Utc>>() {
+        Ok(utc_time) => utc_time
+            .with_timezone(&guatemala_tz)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    }
+}
+
 fn cache_alert(alert: &Alert) {
     let alert_clone = alert.clone();
     with_alert_store(|store| {
@@ -570,6 +654,87 @@ fn handle_rpc_payload(payload: &[u8], app_handle: &tauri::AppHandle) {
         AlarmStatus::ClearedUnack => handle_cleared_alarm(envelope.params, app_handle),
         AlarmStatus::Unknown => {
             warn!("[MQTT] Estado de alarma no manejado, se ignora payload.");
+        }
+    }
+}
+
+fn handle_supabase_update(payload: &SupabaseUpdatePayload, app_handle: &tauri::AppHandle) {
+    match validate_binary_array(&payload.new.message) {
+        Ok(binary_array) => {
+            let timestamp = parse_supabase_timestamp(&payload.commit_timestamp);
+            let update = DeviceStatusUpdate {
+                timestamp: timestamp.clone(),
+                status: binary_array.clone(),
+            };
+
+            info!(
+                "[SUPABASE] Estado actualizado: {:?} en {}",
+                binary_array, timestamp
+            );
+
+            process_refrigerator_alarms(&binary_array, app_handle);
+
+            if let Err(err) = app_handle.emit(DEVICE_STATUS_EVENT, &update) {
+                warn!(
+                    "[SUPABASE] No se pudo emitir evento de actualización: {:?}",
+                    err
+                );
+            }
+        }
+        Err(err) => {
+            error!("[SUPABASE] Validación fallida: {}. Mensaje: {}", err, payload.new.message);
+        }
+    }
+}
+
+fn process_refrigerator_alarms(binary_array: &[u8], app_handle: &tauri::AppHandle) {
+    let store = REFRIGERATOR_ALARM_STATE.get_or_init(|| Mutex::new(vec![0; BINARY_ARRAY_SIZE]));
+    let mut state_guard = store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    
+    let previous_state = state_guard.clone();
+    *state_guard = binary_array.to_vec();
+    
+    for (index, (&current_value, &previous_value)) in binary_array.iter().zip(previous_state.iter()).enumerate() {
+        if index >= REFRIGERATOR_NAMES.len() {
+            break;
+        }
+        
+        if current_value == previous_value {
+            continue;
+        }
+        
+        let device_name = REFRIGERATOR_NAMES[index];
+        let alert_id = format!("refrigerator-temp-{}", index);
+        
+        if current_value == 1 && previous_value == 0 {
+            let alert = Alert {
+                id: alert_id.clone(),
+                date_time: Local::now().format("%d/%m/%Y %H:%M:%S").to_string(),
+                alert_type: AlertType::TempUp,
+                device: device_name.to_string(),
+                description: TEMPERATURE_ALARM_DESCRIPTION.to_string(),
+            };
+            
+            info!(
+                "[REFRIGERATOR] ACTIVADA {} tipo={} dispositivo={}",
+                alert.id, TEMPERATURE_ALARM_TYPE, device_name
+            );
+            cache_alert(&alert);
+            handle_alert_activation_side_effects(app_handle);
+            emit_alert_added(app_handle, &alert);
+        } else if current_value == 0 && previous_value == 1 {
+            if remove_alert_by_id(&alert_id).is_some() {
+                info!(
+                    "[REFRIGERATOR] LIBERADA {} tipo={} dispositivo={}",
+                    alert_id, TEMPERATURE_ALARM_TYPE, device_name
+                );
+                emit_alert_removed(app_handle, &alert_id);
+                if !has_active_alerts() {
+                    handle_no_active_alerts(app_handle);
+                }
+            }
         }
     }
 }
@@ -812,6 +977,7 @@ fn request_shutdown() {
         info!("[CORE] Shutdown solicitado");
     }
     MQTT_CONNECTED.store(false, Ordering::SeqCst);
+    SUPABASE_CONNECTED.store(false, Ordering::SeqCst);
     let _ = stop_buzzer_blinking();
 }
 
@@ -942,6 +1108,149 @@ fn is_mqtt_connected() -> bool {
     MQTT_CONNECTED.load(Ordering::SeqCst)
 }
 
+#[tauri::command]
+fn is_supabase_connected() -> bool {
+    SUPABASE_CONNECTED.load(Ordering::SeqCst)
+}
+
+fn start_supabase_loop(app_handle: tauri::AppHandle) {
+    let cfg = app_config();
+    
+    if cfg.supabase_url.is_empty() || cfg.supabase_anon_key.is_empty() {
+        info!("[SUPABASE] No configurado, omitiendo inicialización");
+        return;
+    }
+
+    let supabase_url = cfg.supabase_url.clone();
+    let supabase_key = cfg.supabase_anon_key.clone();
+
+    if let Err(err) = thread::Builder::new()
+        .name("supabase-loop".to_string())
+        .spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+                error!("[SUPABASE] No se pudo crear runtime: {:?}", e);
+                panic!("Runtime error");
+            });
+
+            rt.block_on(async {
+                let mut retry_delay = SUPABASE_RETRY_DELAY;
+
+                while !is_shutting_down() {
+                    SUPABASE_CONNECTED.store(false, Ordering::SeqCst);
+
+                    let realtime_url = supabase_url
+                        .replace("https://", "wss://")
+                        .replace("http://", "ws://");
+                    let realtime_url = format!("{}/realtime/v1", realtime_url);
+
+                    info!(
+                        "[SUPABASE] Conectando a {}",
+                        realtime_url
+                    );
+
+                    let client = match RealtimeClient::new(
+                        &realtime_url,
+                        RealtimeClientOptions {
+                            api_key: supabase_key.clone(),
+                            ..Default::default()
+                        },
+                    ) {
+                        Ok(c) => c,
+                        Err(err) => {
+                            error!(
+                                "[SUPABASE] No se pudo crear cliente: {:?}. Reintentando en {:?}...",
+                                err, retry_delay
+                            );
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(SUPABASE_MAX_RETRY_DELAY);
+                            continue;
+                        }
+                    };
+
+                    if let Err(err) = client.connect().await {
+                        error!(
+                            "[SUPABASE] No se pudo conectar: {:?}. Reintentando en {:?}...",
+                            err, retry_delay
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(SUPABASE_MAX_RETRY_DELAY);
+                        continue;
+                    }
+
+                    info!("[SUPABASE] Conectado exitosamente");
+                    SUPABASE_CONNECTED.store(true, Ordering::SeqCst);
+                    retry_delay = SUPABASE_RETRY_DELAY;
+
+                    let channel = client.channel(SUPABASE_CHANNEL_NAME, Default::default()).await;
+                    let filter = PostgresChangesFilter::new(PostgresChangeEvent::Update, SUPABASE_DB_SCHEMA);
+                    let mut rx = channel.on_postgres_changes(filter).await;
+
+                    if let Err(err) = channel.subscribe().await {
+                        error!("[SUPABASE] Error al suscribirse: {:?}", err);
+                        SUPABASE_CONNECTED.store(false, Ordering::SeqCst);
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(SUPABASE_MAX_RETRY_DELAY);
+                        continue;
+                    }
+
+                    info!(
+                        "[SUPABASE] Suscrito a cambios UPDATE en {}",
+                        SUPABASE_DB_SCHEMA
+                    );
+
+                    let mut should_reconnect = false;
+                    while !is_shutting_down() {
+                        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                            Ok(Some(change)) => {
+                                if let Ok(json_str) = serde_json::to_string(&change) {
+                                    if let Ok(payload) = serde_json::from_str::<SupabaseUpdatePayload>(&json_str) {
+                                        handle_supabase_update(&payload, &app_handle);
+                                    } else {
+                                        debug!("[SUPABASE] Payload deserializado incorrectamente");
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                warn!("[SUPABASE] Conexión cerrada por servidor");
+                                should_reconnect = true;
+                                break;
+                            }
+                            Err(_) => {
+                                if is_shutting_down() {
+                                    should_reconnect = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if is_shutting_down() {
+                        SUPABASE_CONNECTED.store(false, Ordering::SeqCst);
+                        info!("[SUPABASE] Shutdown finalizado");
+                        break;
+                    }
+
+                    if should_reconnect {
+                        warn!(
+                            "[SUPABASE] Reconectando en {:?}...",
+                            retry_delay
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(SUPABASE_MAX_RETRY_DELAY);
+                    }
+                }
+
+                info!("[SUPABASE] Loop terminado");
+                SUPABASE_CONNECTED.store(false, Ordering::SeqCst);
+            });
+
+            rt.shutdown_timeout(Duration::from_secs(1));
+        })
+    {
+        error!("[SUPABASE] No se pudo iniciar hilo de conexión: {:?}", err);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_logging();
@@ -959,11 +1268,13 @@ pub fn run() {
             check_internet_connection,
             get_mute_status,
             toggle_alerts_mute,
-            is_mqtt_connected
+            is_mqtt_connected,
+            is_supabase_connected
         ])
         .setup(|app| {
             let app_handle = app.handle();
             start_mqtt_loop(app_handle.clone());
+            start_supabase_loop(app_handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,19 +1,21 @@
-# Configuration hmi-cli (thingsboard cloud)
-MQTT_SERVER: mqtt.thingsboard.cloud
-MQTT_USE_SECURE_CLIENT: false
-MQTT_PORT: 1883
-MQTT_CLIENT_ID: hmi-cli
-MQTT_USERNAME: Gmtztj8LRqbdnMbteimu
-MQTT_PASSWORD: 
-MUTE_DURATION: 600
-BUZZER_ENABLED: true
-
-# Configuration ax-server
-# MQTT_SERVER: j0661b06.ala.us-east-1.emqxsl.com
-# MQTT_USE_SECURE_CLIENT: true
-# MQTT_PORT: 8883
+# # Configuration hmi-cli (thingsboard cloud)
+# MQTT_SERVER: mqtt.thingsboard.cloud
+# MQTT_USE_SECURE_CLIENT: false
+# MQTT_PORT: 1883
 # MQTT_CLIENT_ID: hmi-cli
-# MQTT_USERNAME: test
-# MQTT_PASSWORD: test
+# MQTT_USERNAME: Gmtztj8LRqbdnMbteimu
+# MQTT_PASSWORD: 
 # MUTE_DURATION: 600
-# BUZZER_ENABLED: true
+
+# # Configuration ax-server
+MQTT_SERVER: j0661b06.ala.us-east-1.emqxsl.com
+MQTT_USE_SECURE_CLIENT: true
+MQTT_PORT: 8883
+MQTT_CLIENT_ID: hmi-cli
+MQTT_USERNAME: hmi-cli
+MQTT_PASSWORD: hmi-cli
+MUTE_DURATION: 600
+
+# supabase info
+SUPABASE_URL: "https://uqmexwvdctoznkqhopry.supabase.co"
+SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVxbWV4d3ZkY3Rvem5rcWhvcHJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQ5MzM1OTksImV4cCI6MjA3MDUwOTU5OX0.CQlB1b2OyhpRe6QsCvbP3Nw4_KW0DMKZKnOeVh-bDUg"
